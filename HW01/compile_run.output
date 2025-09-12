@@ -1,0 +1,15 @@
+Lmod Warning: This module was built for an older platform and may not work
+correctly! 
+While processing the following module(s):
+    Module fullname  Module Filename
+    ---------------  ---------------
+    gcc/13.2.0       /opt/apps/lmod/modulefiles/gcc/13.2.0.lua
+
+Lmod Warning: Please use a newer version of this module for compatibility with
+Euler Generation 8. 
+While processing the following module(s):
+    Module fullname  Module Filename
+    ---------------  ---------------
+    gcc/13.2.0       /opt/apps/lmod/modulefiles/gcc/13.2.0.lua
+
+Hello from C++ on node: euler145
