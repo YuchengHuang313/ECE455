@@ -162,11 +162,11 @@ int main(int argc, char** argv) {
 
     // Allocate device memory
     float *d_A, *d_B, *d_C, *d_D, *d_out;
-    CUDA_CHECK(cudaMallocManaged(&d_A, bytes));
-    CUDA_CHECK(cudaMallocManaged(&d_B, bytes));
-    CUDA_CHECK(cudaMallocManaged(&d_C, bytes));
-    CUDA_CHECK(cudaMallocManaged(&d_D, bytes));
-    CUDA_CHECK(cudaMallocManaged(&d_out, bytes));
+    CUDA_CHECK(cudaMalloc(&d_A, bytes));
+    CUDA_CHECK(cudaMalloc(&d_B, bytes));
+    CUDA_CHECK(cudaMalloc(&d_C, bytes));
+    CUDA_CHECK(cudaMalloc(&d_D, bytes));
+    CUDA_CHECK(cudaMalloc(&d_out, bytes));
 
     // Copy data to device
     auto gpu_start = std::chrono::high_resolution_clock::now();
