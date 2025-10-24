@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
     std::cout << "Freed input arrays h_A, h_B, h_C, h_D (~" << 4 * bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
 
     // Launch kernel
-    const int threadsPerBlock = 256;
+    const int threadsPerBlock = 64;
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
 
     auto kernel_start = std::chrono::high_resolution_clock::now();
