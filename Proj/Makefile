@@ -64,10 +64,9 @@ LDFLAGS = -lgomp
 
 # Target & sources
 TARGET = small_matmul_test
-CU_SOURCES  = small_matmul.cu
-CPP_SOURCES = small_matmul.cpp
+CU_SOURCES  = small_matmul.cu compare.cu
 HEADERS     = small_matmul.cuh
-OBJECTS     = small_matmul.o small_matmul_cpp.o
+OBJECTS     = small_matmul.o compare.o
 
 # Default
 all: $(TARGET)
@@ -78,7 +77,7 @@ $(TARGET): $(OBJECTS)
 small_matmul.o: small_matmul.cu $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
-small_matmul_cpp.o: small_matmul.cpp $(HEADERS)
+compare.o: compare.cu $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
 run: $(TARGET)

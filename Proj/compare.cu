@@ -7,80 +7,8 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
-#include <random>
 
 #define MAT_SIZE 4
-
-// CPU version of 4x4 matrix multiplication
-void mul4x4_cpu(const float* A, const float* B, float* C) {
-    for (int i = 0; i < MAT_SIZE; i++) {
-        for (int j = 0; j < MAT_SIZE; j++) {
-            float sum = 0.0f;
-            for (int k = 0; k < MAT_SIZE; k++) {
-                sum += A[i * MAT_SIZE + k] * B[k * MAT_SIZE + j];
-            }
-            C[i * MAT_SIZE + j] = sum;
-        }
-    }
-}
-
-// CPU version of batched matrix multiplication
-void small_matmul_batched_cpu(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
-    for (int row = 0; row < num_rows; row++) {
-        float result_AB[MAT_SIZE * MAT_SIZE];
-        float result_CD[MAT_SIZE * MAT_SIZE];
-
-        // Compute A×B
-        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
-
-        // Compute C×D
-        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
-
-        // Compute (A×B)×(C×D)
-        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
-    }
-}
-
-// OpenMP parallelized version of batched matrix multiplication
-void small_matmul_batched_cpu_omp(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
-#pragma omp parallel for schedule(static)
-    for (int row = 0; row < num_rows; row++) {
-        float result_AB[MAT_SIZE * MAT_SIZE];
-        float result_CD[MAT_SIZE * MAT_SIZE];
-
-        // Compute A×B
-        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
-
-        // Compute C×D
-        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
-
-        // Compute (A×B)×(C×D)
-        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
-    }
-}
-
-// Helper function to initialize matrices with random values
-void initialize_random(float* data, int size) {
-    std::random_device rd;
-    std::mt19937 gen(42);  // Fixed seed for reproducibility
-    std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
-
-    for (int i = 0; i < size; i++) {
-        data[i] = dis(gen);
-    }
-}
-
-// Helper function to compare two result arrays
-bool compare_results(const float* cpu_result, const float* gpu_result, int size, float tolerance = 1e-4f) {
-    for (int i = 0; i < size; i++) {
-        float diff = std::abs(cpu_result[i] - gpu_result[i]);
-        if (diff > tolerance) {
-            std::cout << "Mismatch at index " << i << ": CPU=" << cpu_result[i] << ", GPU=" << gpu_result[i] << ", diff=" << diff << std::endl;
-            return false;
-        }
-    }
-    return true;
-}
 
 // Check CUDA errors
 #define CUDA_CHECK(call)                                                                                                   \
@@ -189,10 +117,31 @@ int main(int argc, char** argv) {
     const int threadsPerBlock = 64;
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
 
+    // Check if we exceed max grid dimension on X axis (2^31-1 for modern GPUs)
+    const long long maxGridDimX = 2147483647LL;  // 2^31 - 1
+    if ((long long)numBlocks > maxGridDimX) {
+        std::cerr << "Error: Number of blocks (" << numBlocks << ") exceeds maximum X grid dimension (" << maxGridDimX << ")" << std::endl;
+        std::cerr << "This would require more than ~137 billion matrices. Consider batching your computation." << std::endl;
+        
+        // Free memory and exit
+        delete[] h_verify_cpu;
+        delete[] h_out_gpu;
+        cudaFree(d_A);
+        cudaFree(d_B);
+        cudaFree(d_C);
+        cudaFree(d_D);
+        cudaFree(d_out);
+        return 1;
+    }
+
     auto kernel_start = std::chrono::high_resolution_clock::now();
 
-    small_matmul_batched_launch(d_A, d_B, d_C, d_D, d_out, num_matrices, numBlocks, threadsPerBlock);
-
+    // Launch kernel directly
+    dim3 blocks(numBlocks, 1);  // Use X dimension instead of Y
+    dim3 threads(threadsPerBlock, 1);
+    small_matmul_batched<<<blocks, threads>>>(d_A, d_B, d_C, d_D, d_out, num_matrices);
+    
+    CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     auto kernel_end = std::chrono::high_resolution_clock::now();
 
@@ -214,7 +163,7 @@ int main(int argc, char** argv) {
 
     // ========== VERIFICATION ==========
     std::cout << "\nVerifying results (using " << verify_samples << " sample elements)..." << std::endl;
-    bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples);
+    bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples, 1e-4f);
 
     if (correct_gpu) {
         std::cout << "✓ GPU results match CPU! Implementation is correct." << std::endl;

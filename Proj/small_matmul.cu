@@ -1,24 +1,15 @@
-#include <cuda_runtime.h>
-
 #include "small_matmul.cuh"
+
+#include <cuda_runtime.h>
+#include <omp.h>
+
+#include <cmath>
+#include <iostream>
+#include <random>
 
 #define MAT_SIZE 4
 
-__global__ void small_matmul_batched(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
-    // this would only be called with a vertical block
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row >= num_rows) return;
-
-    // extract A B C D
-    float result_AB[MAT_SIZE * MAT_SIZE];
-    mul4x4_one(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
-
-    float result_CD[MAT_SIZE * MAT_SIZE];
-    mul4x4_one(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
-
-    // find final result matrix - write to this thread's output location
-    mul4x4_one(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
-}
+// ========== CUDA KERNEL AND DEVICE FUNCTIONS ==========
 
 __device__ __forceinline__ void mul4x4_one(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C) {
     // load rows of A
@@ -55,10 +46,93 @@ __device__ __forceinline__ void mul4x4_one(const float* __restrict__ A, const fl
     C[15] = a30 * b03 + a31 * b13 + a32 * b23 + a33 * b33;
 }
 
-// C-linkage wrapper for launching the kernel from C++ code
-extern "C" void small_matmul_batched_launch(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows, int blocks_y,
-                                            int threads_y) {
-    dim3 blocks(1, blocks_y);
-    dim3 threads(1, threads_y);
-    small_matmul_batched<<<blocks, threads>>>(A, B, C, D, out, num_rows);
+__global__ void small_matmul_batched(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
+    // this would only be called with a vertical block
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    // extract A B C D
+    float result_AB[MAT_SIZE * MAT_SIZE];
+    mul4x4_one(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
+
+    float result_CD[MAT_SIZE * MAT_SIZE];
+    mul4x4_one(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
+
+    // find final result matrix - write to this thread's output location
+    mul4x4_one(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+}
+
+// ========== CPU FUNCTIONS ==========
+
+// CPU version of 4x4 matrix multiplication
+void mul4x4_cpu(const float* A, const float* B, float* C) {
+    for (int i = 0; i < MAT_SIZE; i++) {
+        for (int j = 0; j < MAT_SIZE; j++) {
+            float sum = 0.0f;
+            for (int k = 0; k < MAT_SIZE; k++) {
+                sum += A[i * MAT_SIZE + k] * B[k * MAT_SIZE + j];
+            }
+            C[i * MAT_SIZE + j] = sum;
+        }
+    }
+}
+
+// CPU version of batched matrix multiplication
+void small_matmul_batched_cpu(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
+    for (int row = 0; row < num_rows; row++) {
+        float result_AB[MAT_SIZE * MAT_SIZE];
+        float result_CD[MAT_SIZE * MAT_SIZE];
+
+        // Compute A×B
+        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
+
+        // Compute C×D
+        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
+
+        // Compute (A×B)×(C×D)
+        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+    }
+}
+
+// OpenMP parallelized version of batched matrix multiplication
+void small_matmul_batched_cpu_omp(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
+#pragma omp parallel for schedule(static)
+    for (int row = 0; row < num_rows; row++) {
+        float result_AB[MAT_SIZE * MAT_SIZE];
+        float result_CD[MAT_SIZE * MAT_SIZE];
+
+        // Compute A×B
+        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
+
+        // Compute C×D
+        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
+
+        // Compute (A×B)×(C×D)
+        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+    }
+}
+
+// ========== HELPER FUNCTIONS ==========
+
+// Helper function to initialize matrices with random values
+void initialize_random(float* data, int size) {
+    std::random_device rd;
+    std::mt19937 gen(42);  // Fixed seed for reproducibility
+    std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
+
+    for (int i = 0; i < size; i++) {
+        data[i] = dis(gen);
+    }
+}
+
+// Helper function to compare two result arrays
+bool compare_results(const float* cpu_result, const float* gpu_result, int size, float tolerance) {
+    for (int i = 0; i < size; i++) {
+        float diff = std::abs(cpu_result[i] - gpu_result[i]);
+        if (diff > tolerance) {
+            std::cout << "Mismatch at index " << i << ": CPU=" << cpu_result[i] << ", GPU=" << gpu_result[i] << ", diff=" << diff << std::endl;
+            return false;
+        }
+    }
+    return true;
 }
