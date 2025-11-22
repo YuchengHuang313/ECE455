@@ -63,35 +63,65 @@ NVCC_FLAGS += -gencode arch=compute_$(SM),code=sm_$(SM)
 LDFLAGS = -lgomp
 
 # Target & sources
-TARGET = small_matmul_test
-CU_SOURCES  = small_matmul.cu compare.cu
-HEADERS     = small_matmul.cuh
-OBJECTS     = small_matmul.o compare.o
+TARGET_MEM_LAYOUT = compare_mem_layout
+TARGET_VAR_JOINTS = compare_variable_joints
+TARGET_CORRECTNESS = test_combined_correctness
+CU_SOURCES = small_matmul.cu compare_mem_layout.cu compare_variable_joints.cu test_combined_correctness.cu
+HEADERS = small_matmul.cuh
+OBJECTS_MEM_LAYOUT = small_matmul.o compare_mem_layout.o
+OBJECTS_VAR_JOINTS = small_matmul.o compare_variable_joints.o
+OBJECTS_CORRECTNESS = small_matmul.o test_combined_correctness.o
 
 # Default
-all: $(TARGET)
+all: $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS)
 
-$(TARGET): $(OBJECTS)
+$(TARGET_MEM_LAYOUT): $(OBJECTS_MEM_LAYOUT)
+	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TARGET_VAR_JOINTS): $(OBJECTS_VAR_JOINTS)
+	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS)
+
+$(TARGET_CORRECTNESS): $(OBJECTS_CORRECTNESS)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS)
 
 small_matmul.o: small_matmul.cu $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
-compare.o: compare.cu $(HEADERS)
+compare_mem_layout.o: compare_mem_layout.cu $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
-run: $(TARGET)
-	./$(TARGET)
+compare_variable_joints.o: compare_variable_joints.cu $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
-run-small: $(TARGET)
-	./$(TARGET) 100
-run-medium: $(TARGET)
-	./$(TARGET) 10000
-run-large: $(TARGET)
-	./$(TARGET) 100000
+test_combined_correctness.o: test_combined_correctness.cu $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+
+run: $(TARGET_VAR_JOINTS)
+	./$(TARGET_VAR_JOINTS) 1000000
+
+run-mem-layout: $(TARGET_MEM_LAYOUT)
+	./$(TARGET_MEM_LAYOUT) 1000000
+
+run-mem-layout-small: $(TARGET_MEM_LAYOUT)
+	./$(TARGET_MEM_LAYOUT) 10000
+
+run-mem-layout-large: $(TARGET_MEM_LAYOUT)
+	./$(TARGET_MEM_LAYOUT) 5000000
+
+run-joints: $(TARGET_VAR_JOINTS)
+	./$(TARGET_VAR_JOINTS) 1000000
+
+run-joints-small: $(TARGET_VAR_JOINTS)
+	./$(TARGET_VAR_JOINTS) 10000
+
+run-joints-large: $(TARGET_VAR_JOINTS)
+	./$(TARGET_VAR_JOINTS) 5000000
+
+run-correctness: $(TARGET_CORRECTNESS)
+	./$(TARGET_CORRECTNESS)
 
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f *.o $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS)
 
 rebuild: clean all
 
@@ -111,4 +141,4 @@ gpuinfo:
 
 info: gpuinfo
 
-.PHONY: all run run-small run-medium run-large clean rebuild gpuinfo info
+.PHONY: all run run-mem-layout run-mem-layout-small run-mem-layout-large run-joints run-joints-small run-joints-large run-correctness clean rebuild gpuinfo info
