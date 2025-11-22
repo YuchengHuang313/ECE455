@@ -19,10 +19,10 @@
         }                                                                                                                  \
     } while (0)
 
-void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
+void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
-    const int total_input_elements = num_matrices * num_joints * elements_per_matrix;
-    const int total_output_elements = num_matrices * elements_per_matrix;
+    const int total_input_elements = num_ops * num_joints * elements_per_matrix;
+    const int total_output_elements = num_ops * elements_per_matrix;
     const size_t input_bytes = total_input_elements * sizeof(float);
     const size_t output_bytes = total_output_elements * sizeof(float);
 
@@ -37,13 +37,13 @@ void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
 
     // ========== CPU SINGLE-THREADED ==========
     auto cpu_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined_cpu(h_matrices, h_out_cpu, num_matrices, num_joints);
+    small_matmul_batched_combined_cpu(h_matrices, h_out_cpu, num_ops, num_joints);
     auto cpu_end = std::chrono::high_resolution_clock::now();
     auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
 
     // ========== CPU OPENMP ==========
     auto cpu_omp_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined_cpu_omp(h_matrices, h_out_cpu_omp, num_matrices, num_joints);
+    small_matmul_batched_combined_cpu_omp(h_matrices, h_out_cpu_omp, num_ops, num_joints);
     auto cpu_omp_end = std::chrono::high_resolution_clock::now();
     auto cpu_omp_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_omp_end - cpu_omp_start);
 
@@ -56,12 +56,12 @@ void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
     CUDA_CHECK(cudaMemcpy(d_matrices, h_matrices, input_bytes, cudaMemcpyHostToDevice));
     auto copy_end = std::chrono::high_resolution_clock::now();
 
-    int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
+    int numBlocks = (num_ops + threadsPerBlock - 1) / threadsPerBlock;
     dim3 blocks(numBlocks, 1);
     dim3 threads(threadsPerBlock, 1);
 
     auto kernel_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined<<<blocks, threads>>>(d_matrices, d_out, num_matrices, num_joints);
+    small_matmul_batched_combined<<<blocks, threads>>>(d_matrices, d_out, num_ops, num_joints);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     auto kernel_end = std::chrono::high_resolution_clock::now();
@@ -84,7 +84,7 @@ void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
     // Calculate GFLOPS
     // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
     // We do (num_joints - 1) multiplications per set (I × M0 × M1 × ... × Mn)
-    long long total_flops = (long long)num_matrices * (num_joints - 1) * 128;
+    long long total_flops = (long long)num_ops * (num_joints - 1) * 128;
     double cpu_gflops = (double)total_flops / (cpu_duration.count() * 1e3);
     double cpu_omp_gflops = (double)total_flops / (cpu_omp_duration.count() * 1e3);
     double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
@@ -106,11 +106,11 @@ void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
 }
 
 int main(int argc, char** argv) {
-    int num_matrices = 500000;
+    int num_ops = 500000;
     int threadsPerBlock = 64;
 
     if (argc > 1) {
-        num_matrices = std::atoi(argv[1]);
+        num_ops = std::atoi(argv[1]);
     }
     if (argc > 2) {
         threadsPerBlock = std::atoi(argv[2]);
@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
 
     std::cout << "========================================" << std::endl;
     std::cout << "  Matrix Chain Multiplication Test" << std::endl;
-    std::cout << "  Number of matrix sets: " << num_matrices << std::endl;
+    std::cout << "  Number of matrix sets: " << num_ops << std::endl;
     std::cout << "  Threads per block: " << threadsPerBlock << std::endl;
     std::cout << "  OpenMP threads: " << num_threads << std::endl;
     std::cout << "========================================" << std::endl;
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     int num_configs = sizeof(joint_configs) / sizeof(joint_configs[0]);
 
     for (int i = 0; i < num_configs; i++) {
-        test_num_joints(num_matrices, joint_configs[i], threadsPerBlock);
+        test_num_joints(num_ops, joint_configs[i], threadsPerBlock);
     }
 
     std::cout << std::endl;
