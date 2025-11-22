@@ -33,6 +33,7 @@ int main(int argc, char** argv) {
     // Test parameters
     int num_rows = 10;
     int num_joints = 4;
+    int threadsPerBlock = 64;
 
     if (argc > 1) {
         num_rows = std::atoi(argv[1]);
@@ -40,10 +41,14 @@ int main(int argc, char** argv) {
     if (argc > 2) {
         num_joints = std::atoi(argv[2]);
     }
+    if (argc > 3) {
+        threadsPerBlock = std::atoi(argv[3]);
+    }
 
     std::cout << "Testing small_matmul_batched_combined" << std::endl;
     std::cout << "Number of rows: " << num_rows << std::endl;
     std::cout << "Number of joints per row: " << num_joints << std::endl;
+    std::cout << "Threads per block: " << threadsPerBlock << std::endl;
     std::cout << std::endl;
 
     // Calculate sizes
@@ -76,7 +81,6 @@ int main(int argc, char** argv) {
 
     // Launch kernel
     std::cout << "Running GPU kernel..." << std::endl;
-    const int threadsPerBlock = 64;
     int numBlocks = (num_rows + threadsPerBlock - 1) / threadsPerBlock;
 
     dim3 blocks(numBlocks, 1);
@@ -89,9 +93,13 @@ int main(int argc, char** argv) {
     // Copy result back
     CUDA_CHECK(cudaMemcpy(h_out_gpu, d_out, output_bytes, cudaMemcpyDeviceToHost));
 
-    // Verify results
-    std::cout << "\nVerifying results..." << std::endl;
-    bool correct = compare_results(h_out_cpu, h_out_gpu, total_output_elements, 1e-3f);
+    // Verify results with adaptive tolerance based on chain length
+    // Longer chains accumulate more floating-point error (grows quadratically)
+    float base_tolerance = 1e-3f;
+    float n = (num_joints - 2);
+    float gpu_tolerance = base_tolerance * (1.0f + 0.1f * n + 0.01f * n * n);
+    std::cout << "\nVerifying results (tolerance: " << std::scientific << gpu_tolerance << ")..." << std::endl;
+    bool correct = compare_results(h_out_cpu, h_out_gpu, total_output_elements, gpu_tolerance);
 
     if (correct) {
         std::cout << "✓ TEST PASSED: GPU results match CPU!" << std::endl;

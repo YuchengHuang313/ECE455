@@ -31,10 +31,15 @@ std::string center(const std::string& str, int width) {
     } while (0)
 
 int main(int argc, char** argv) {
-    // Default number of matrices
+    // Default parameters
     int num_matrices = 1000000;
+    int threadsPerBlock = 64;
+
     if (argc > 1) {
         num_matrices = std::atoi(argv[1]);
+    }
+    if (argc > 2) {
+        threadsPerBlock = std::atoi(argv[2]);
     }
 
     int num_threads = omp_get_max_threads();
@@ -44,6 +49,7 @@ int main(int argc, char** argv) {
     std::cout << "  Memory Layout Comparison Test" << std::endl;
     std::cout << "  Number of matrix sets: " << num_matrices << std::endl;
     std::cout << "  Number of joints (chain length): " << num_joints << std::endl;
+    std::cout << "  Threads per block: " << threadsPerBlock << std::endl;
     std::cout << "  OpenMP threads: " << num_threads << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
@@ -123,7 +129,6 @@ int main(int argc, char** argv) {
     delete[] h_D;
 
     // Launch kernel
-    const int threadsPerBlock = 64;
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
 
     // Check if we exceed max grid dimension on X axis (2^31-1 for modern GPUs)

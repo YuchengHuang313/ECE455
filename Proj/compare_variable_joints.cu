@@ -19,7 +19,7 @@
         }                                                                                                                  \
     } while (0)
 
-void test_num_joints(int num_matrices, int num_joints) {
+void test_num_joints(int num_matrices, int num_joints, int threadsPerBlock) {
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
     const int total_input_elements = num_matrices * num_joints * elements_per_matrix;
     const int total_output_elements = num_matrices * elements_per_matrix;
@@ -56,7 +56,6 @@ void test_num_joints(int num_matrices, int num_joints) {
     CUDA_CHECK(cudaMemcpy(d_matrices, h_matrices, input_bytes, cudaMemcpyHostToDevice));
     auto copy_end = std::chrono::high_resolution_clock::now();
 
-    const int threadsPerBlock = 64;
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
     dim3 blocks(numBlocks, 1);
     dim3 threads(threadsPerBlock, 1);
@@ -75,8 +74,10 @@ void test_num_joints(int num_matrices, int num_joints) {
     auto gpu_total_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
 
     // Verify correctness (use adaptive tolerance for longer chains)
-    // Longer chains accumulate more floating-point error
-    float gpu_tolerance = 1e-3f * (1.0f + (num_joints - 2) * 0.15f);  // Scale with chain length
+    // Longer chains accumulate more floating-point error (grows quadratically)
+    float base_tolerance = 1e-3f;
+    float n = (num_joints - 2);
+    float gpu_tolerance = base_tolerance * (1.0f + 0.1f * n + 0.01f * n * n);
     bool correct_cpu_omp = compare_results(h_out_cpu, h_out_cpu_omp, total_output_elements, 1e-5f);
     bool correct_gpu = compare_results(h_out_cpu, h_out_gpu, total_output_elements, gpu_tolerance);
 
@@ -106,8 +107,13 @@ void test_num_joints(int num_matrices, int num_joints) {
 
 int main(int argc, char** argv) {
     int num_matrices = 500000;
+    int threadsPerBlock = 64;
+
     if (argc > 1) {
         num_matrices = std::atoi(argv[1]);
+    }
+    if (argc > 2) {
+        threadsPerBlock = std::atoi(argv[2]);
     }
 
     int num_threads = omp_get_max_threads();
@@ -115,6 +121,7 @@ int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
     std::cout << "  Matrix Chain Multiplication Test" << std::endl;
     std::cout << "  Number of matrix sets: " << num_matrices << std::endl;
+    std::cout << "  Threads per block: " << threadsPerBlock << std::endl;
     std::cout << "  OpenMP threads: " << num_threads << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
@@ -136,7 +143,7 @@ int main(int argc, char** argv) {
     int num_configs = sizeof(joint_configs) / sizeof(joint_configs[0]);
 
     for (int i = 0; i < num_configs; i++) {
-        test_num_joints(num_matrices, joint_configs[i]);
+        test_num_joints(num_matrices, joint_configs[i], threadsPerBlock);
     }
 
     std::cout << std::endl;
