@@ -18,29 +18,6 @@
         }                                                                                                                  \
     } while (0)
 
-// CPU reference implementation
-void small_matmul_batched_combined_cpu(const float* matrix, float* out, int num_rows, int num_joints) {
-    const int mat_size = MAT_SIZE * MAT_SIZE;
-
-    for (int row = 0; row < num_rows; row++) {
-        // Initialize result to identity matrix
-        float result[mat_size];
-        for (int i = 0; i < mat_size; i++) {
-            result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
-        }
-
-        // Multiply all matrices in sequence
-        for (int joint = 0; joint < num_joints; joint++) {
-            float temp[mat_size];
-            mul4x4_cpu(result, &matrix[(row * num_joints + joint) * mat_size], temp);
-            std::memcpy(result, temp, mat_size * sizeof(float));
-        }
-
-        // Copy result to output
-        std::memcpy(&out[row * mat_size], result, mat_size * sizeof(float));
-    }
-}
-
 void print_matrix(const float* mat, const char* name) {
     std::cout << name << ":\n";
     for (int i = 0; i < MAT_SIZE; i++) {

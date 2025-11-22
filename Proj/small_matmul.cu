@@ -2,6 +2,7 @@
 #include <omp.h>
 
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <random>
 
@@ -256,7 +257,9 @@ bool compare_results(const float* cpu_result, const float* gpu_result, int size,
     for (int i = 0; i < size; i++) {
         float diff = std::abs(cpu_result[i] - gpu_result[i]);
         if (diff > tolerance) {
-            std::cout << "Mismatch at index " << i << ": CPU=" << cpu_result[i] << ", GPU=" << gpu_result[i] << ", diff=" << diff << std::endl;
+            std::cout << "Mismatch at index " << i << ": CPU=" << cpu_result[i] << ", GPU=" << gpu_result[i] << std::scientific
+                      << std::setprecision(6) << ", diff=" << diff << std::defaultfloat << std::setprecision(6) << " (tol=" << tolerance << ")"
+                      << std::endl;
             return false;
         }
     }

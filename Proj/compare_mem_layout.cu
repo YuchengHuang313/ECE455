@@ -6,10 +6,19 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <string>
 
 #include "small_matmul.cuh"
 
 #define MAT_SIZE 4
+
+// Helper function for center-aligned text
+std::string center(const std::string& str, int width) {
+    int padding = width - str.length();
+    int pad_left = padding / 2;
+    int pad_right = padding - pad_left;
+    return std::string(pad_left, ' ') + str + std::string(pad_right, ' ');
+}
 
 // Check CUDA errors
 #define CUDA_CHECK(call)                                                                                                   \
@@ -23,14 +32,21 @@
 
 int main(int argc, char** argv) {
     // Default number of matrices
-    int num_matrices = 1000;
+    int num_matrices = 1000000;
     if (argc > 1) {
         num_matrices = std::atoi(argv[1]);
     }
 
-    std::cout << "Batched 4x4 Matrix Multiplication Test" << std::endl;
-    std::cout << "Number of matrices: " << num_matrices << std::endl;
+    int num_threads = omp_get_max_threads();
+    const int num_joints = 4;
+
     std::cout << "========================================" << std::endl;
+    std::cout << "  Memory Layout Comparison Test" << std::endl;
+    std::cout << "  Number of matrix sets: " << num_matrices << std::endl;
+    std::cout << "  Number of joints (chain length): " << num_joints << std::endl;
+    std::cout << "  OpenMP threads: " << num_threads << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << std::endl;
 
     // Calculate sizes
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
@@ -64,7 +80,6 @@ int main(int argc, char** argv) {
 
     // ========== CPU OMP VERSION ==========
     float* h_out_cpu_omp = new float[total_elements];
-    int num_threads = omp_get_max_threads();
     auto cpu_omp_start = std::chrono::high_resolution_clock::now();
 
     small_matmul_batched_cpu_omp(h_A, h_B, h_C, h_D, h_out_cpu_omp, num_matrices);
@@ -153,7 +168,19 @@ int main(int argc, char** argv) {
     // ========== VERIFICATION ==========
     bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples, 1e-4f);
 
-    const int num_joints = 4;
+    // Free verification data - no longer needed
+    delete[] h_verify_cpu;
+    delete[] h_out_gpu;
+
+    // Free GPU memory for separate layout
+    CUDA_CHECK(cudaFree(d_A));
+    CUDA_CHECK(cudaFree(d_B));
+    CUDA_CHECK(cudaFree(d_C));
+    CUDA_CHECK(cudaFree(d_D));
+    CUDA_CHECK(cudaFree(d_out));
+
+    // ========== COMBINED LAYOUT ==========
+
     const int total_combined_input = num_matrices * num_joints * elements_per_matrix;
     const size_t combined_input_bytes = total_combined_input * sizeof(float);
 
@@ -212,9 +239,54 @@ int main(int argc, char** argv) {
     bool correct_combined = compare_results(h_out_cpu_combined, h_out_gpu_combined, total_elements, 1e-3f);
     bool correct_omp_combined = compare_results(h_out_cpu_combined, h_out_cpu_omp_combined, total_elements, 1e-5f);
 
-    if (!correct_combined || !correct_omp_combined) {
-        std::cerr << "ERROR: Combined layout verification failed!" << std::endl;
-    }
+    // Calculate GFLOPS
+    // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
+    // We do 3 multiplications per set: A×B, C×D, (A×B)×(C×D)
+    long long total_flops = (long long)num_matrices * 3 * 128;
+    double cpu_gflops = (double)total_flops / (cpu_duration.count() * 1e3);
+    double cpu_omp_gflops = (double)total_flops / (cpu_omp_duration.count() * 1e3);
+    double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
+    double cpu_combined_gflops = (double)total_flops / (cpu_combined_duration.count() * 1e3);
+    double cpu_omp_combined_gflops = (double)total_flops / (cpu_omp_combined_duration.count() * 1e3);
+    double gpu_combined_gflops = (double)total_flops / (kernel_combined_duration.count() * 1e3);
+
+    // ========== PRINT RESULTS TABLE ==========
+    std::cout << std::endl;
+    std::cout << center("Layout", 10) << " | " << center("CPU (ms)", 10) << " | " << center("OMP (ms)", 10) << " | " << center("GPU (ms)", 10)
+              << " | " << center("CPU GF", 8) << " | " << center("OMP GF", 8) << " | " << center("GPU GF", 8) << " | " << center("Speedup", 10)
+              << " | " << center("OK", 4) << std::endl;
+    std::cout << "-----------|------------|------------|------------|----------|----------|----------|------------|------" << std::endl;
+
+    // Separate layout row
+    std::cout << std::setw(10) << std::right << "Separate" << " | " << std::setw(10) << std::fixed << std::setprecision(3)
+              << cpu_duration.count() / 1000.0 << " | " << std::setw(10) << cpu_omp_duration.count() / 1000.0 << " | " << std::setw(10)
+              << kernel_duration.count() / 1000.0 << " | " << std::setw(8) << std::setprecision(1) << cpu_gflops << " | " << std::setw(8)
+              << cpu_omp_gflops << " | " << std::setw(8) << gpu_gflops << " | " << std::setw(9) << std::setprecision(2)
+              << (double)cpu_duration.count() / kernel_duration.count() << "x | " << (correct_gpu ? "  ✓" : "  ✗") << std::endl;
+
+    // Combined layout row
+    std::cout << std::setw(10) << std::right << "Combined" << " | " << std::setw(10) << std::fixed << std::setprecision(3)
+              << cpu_combined_duration.count() / 1000.0 << " | " << std::setw(10) << cpu_omp_combined_duration.count() / 1000.0 << " | "
+              << std::setw(10) << kernel_combined_duration.count() / 1000.0 << " | " << std::setw(8) << std::setprecision(1) << cpu_combined_gflops
+              << " | " << std::setw(8) << cpu_omp_combined_gflops << " | " << std::setw(8) << gpu_combined_gflops << " | " << std::setw(9)
+              << std::setprecision(2) << (double)cpu_combined_duration.count() / kernel_combined_duration.count() << "x | "
+              << (correct_combined && correct_omp_combined ? "  ✓" : "  ✗") << std::endl;
+
+    std::cout << std::endl;
+    std::cout << "Legend:" << std::endl;
+    std::cout << "  Layout  = Memory layout (Separate: A,B,C,D arrays; Combined: interleaved)" << std::endl;
+    std::cout << "  CPU/OMP = Single-threaded/OpenMP execution time" << std::endl;
+    std::cout << "  GPU     = GPU kernel execution time (excluding copy)" << std::endl;
+    std::cout << "  GF      = GFLOPS (billions of floating-point ops/sec)" << std::endl;
+    std::cout << "  Speedup = GPU speedup vs single-threaded CPU" << std::endl;
+    std::cout << "  OK      = Verification passed (✓) or failed (✗)" << std::endl;
+
+    std::cout << std::endl;
+    std::cout << "Performance improvement (Combined vs Separate):" << std::endl;
+    std::cout << "  CPU single:  " << std::setprecision(2) << (double)cpu_duration.count() / cpu_combined_duration.count() << "x" << std::endl;
+    std::cout << "  CPU OMP:     " << (double)cpu_omp_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
+    std::cout << "  GPU kernel:  " << (double)kernel_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
+    std::cout << "========================================" << std::endl;
 
     // Cleanup combined
     delete[] h_matrices_combined;
@@ -223,73 +295,6 @@ int main(int argc, char** argv) {
     delete[] h_out_gpu_combined;
     CUDA_CHECK(cudaFree(d_matrices_combined));
     CUDA_CHECK(cudaFree(d_out_combined));
-
-    // ========== PERFORMANCE SUMMARY ==========
-    std::cout << "\n========================================" << std::endl;
-    std::cout << "         PERFORMANCE SUMMARY" << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    std::cout << "\n[EXECUTION TIME]" << std::endl;
-    std::cout << std::fixed << std::setprecision(3);
-    std::cout << "                          Separate    Combined" << std::endl;
-    std::cout << "CPU (single-thread):      " << std::setw(7) << cpu_duration.count() / 1000.0 << " ms  " << std::setw(7)
-              << cpu_combined_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "CPU (OpenMP " << num_threads << " threads):    " << std::setw(7) << cpu_omp_duration.count() / 1000.0 << " ms  " << std::setw(7)
-              << cpu_omp_combined_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "GPU (kernel only):        " << std::setw(7) << kernel_duration.count() / 1000.0 << " ms  " << std::setw(7)
-              << kernel_combined_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "GPU (total w/ copy):      " << std::setw(7) << gpu_total_duration.count() / 1000.0 << " ms  " << std::setw(7)
-              << gpu_combined_total.count() / 1000.0 << " ms" << std::endl;
-
-    std::cout << "\n[SPEEDUP vs CPU Single-Threaded]" << std::endl;
-    std::cout << std::setprecision(2);
-    std::cout << "                          Separate    Combined" << std::endl;
-    std::cout << "OpenMP (" << num_threads << " threads):      " << std::setw(7) << (double)cpu_duration.count() / cpu_omp_duration.count()
-              << "x     " << std::setw(7) << (double)cpu_combined_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
-    std::cout << "GPU (kernel only):        " << std::setw(7) << (double)cpu_duration.count() / kernel_duration.count() << "x     " << std::setw(7)
-              << (double)cpu_combined_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
-    std::cout << "GPU (total):              " << std::setw(7) << (double)cpu_duration.count() / gpu_total_duration.count() << "x     " << std::setw(7)
-              << (double)cpu_combined_duration.count() / gpu_combined_total.count() << "x" << std::endl;
-
-    // Calculate GFLOPS
-    // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
-    // We do 3 multiplications per set: A×B, C×D, (A×B)×(C×D)
-    long long total_flops = (long long)num_matrices * 3 * 128;
-    double cpu_gflops = (double)total_flops / (cpu_duration.count() * 1e3);  // GFLOPS
-    double cpu_omp_gflops = (double)total_flops / (cpu_omp_duration.count() * 1e3);
-    double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
-    double cpu_combined_gflops = (double)total_flops / (cpu_combined_duration.count() * 1e3);
-    double cpu_omp_combined_gflops = (double)total_flops / (cpu_omp_combined_duration.count() * 1e3);
-    double gpu_combined_gflops = (double)total_flops / (kernel_combined_duration.count() * 1e3);
-
-    std::cout << "\n[PERFORMANCE (GFLOPS)]" << std::endl;
-    std::cout << std::setprecision(1);
-    std::cout << "                          Separate    Combined" << std::endl;
-    std::cout << "CPU (single):             " << std::setw(7) << cpu_gflops << "     " << std::setw(7) << cpu_combined_gflops << std::endl;
-    std::cout << "CPU (OpenMP):             " << std::setw(7) << cpu_omp_gflops << "     " << std::setw(7) << cpu_omp_combined_gflops << std::endl;
-    std::cout << "GPU (kernel):             " << std::setw(7) << gpu_gflops << "     " << std::setw(7) << gpu_combined_gflops << std::endl;
-
-    std::cout << "\n[LAYOUT COMPARISON]" << std::endl;
-    std::cout << std::setprecision(2);
-    std::cout << "Combined vs Separate speedup:" << std::endl;
-    std::cout << "  CPU single:        " << (double)cpu_duration.count() / cpu_combined_duration.count() << "x" << std::endl;
-    std::cout << "  CPU OMP:           " << (double)cpu_omp_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
-    std::cout << "  GPU (kernel):      " << (double)kernel_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
-
-    std::cout << "\n[VERIFICATION]" << std::endl;
-    std::cout << "Separate layout:   " << (correct_gpu ? "✓ PASS" : "✗ FAIL") << std::endl;
-    std::cout << "Combined layout:   " << (correct_combined && correct_omp_combined ? "✓ PASS" : "✗ FAIL") << std::endl;
-    std::cout << "========================================" << std::endl;
-
-    // Cleanup (h_A, h_B, h_C, h_D, h_out_cpu_omp, h_out_cpu already freed earlier)
-    delete[] h_verify_cpu;
-    delete[] h_out_gpu;
-
-    CUDA_CHECK(cudaFree(d_A));
-    CUDA_CHECK(cudaFree(d_B));
-    CUDA_CHECK(cudaFree(d_C));
-    CUDA_CHECK(cudaFree(d_D));
-    CUDA_CHECK(cudaFree(d_out));
 
     return 0;
 }
