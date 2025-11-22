@@ -1,11 +1,11 @@
-#include "small_matmul.cuh"
-
 #include <cuda_runtime.h>
 #include <omp.h>
 
 #include <cmath>
 #include <iostream>
 #include <random>
+
+#include "small_matmul.cuh"
 
 #define MAT_SIZE 4
 
@@ -62,6 +62,39 @@ __global__ void small_matmul_batched(const float* A, const float* B, const float
     mul4x4_one(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
 }
 
+__global__ void small_matmul_batched_combined(const float* matrix, float* out, int num_rows, int num_joints) {
+    // this would only be called with a vertical block
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= num_rows) return;
+
+    // matrix contains arbitrary number of 4x4 matrices as a 16x1 vector per row
+    // there might be an arbitrary number of joints, so we could have A, B, C, D, E, F, ...
+    // we will multiply them all together in sequence: (((A×B)×C)×D)...
+    // each thread calculates matrix mult in sequence
+    float result[MAT_SIZE * MAT_SIZE];
+    // Initialize result to identity matrix
+
+#pragma unroll
+    for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
+        result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
+    }
+
+#pragma unroll
+    for (int joint = 0; joint < num_joints; joint++) {
+        float temp[MAT_SIZE * MAT_SIZE];
+        mul4x4_one(result, &matrix[(row * num_joints + joint) * MAT_SIZE * MAT_SIZE], temp);
+        // Copy temp back to result for next iteration
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
+            result[i] = temp[i];
+        }
+    }
+
+    // write final result to output
+#pragma unroll
+    for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
+        out[row * MAT_SIZE * MAT_SIZE + i] = result[i];
+    }
+}
 // ========== CPU FUNCTIONS ==========
 
 // CPU version of 4x4 matrix multiplication - optimized
@@ -122,9 +155,8 @@ void small_matmul_batched_cpu(const float* A, const float* B, const float* C, co
 }
 
 // OpenMP parallelized version of batched matrix multiplication
-void small_matmul_batched_cpu_omp(const float* __restrict__ A, const float* __restrict__ B, 
-                                   const float* __restrict__ C, const float* __restrict__ D, 
-                                   float* __restrict__ out, int num_rows) {
+void small_matmul_batched_cpu_omp(const float* __restrict__ A, const float* __restrict__ B, const float* __restrict__ C, const float* __restrict__ D,
+                                  float* __restrict__ out, int num_rows) {
     // Use static schedule with optimal chunk size for cache locality
     // Empirically tested: chunk size 256-4096 performs best (4096 gives ~53 GFLOPS)
     // Smaller chunks (256) also work well, larger chunks (4096) slightly better
@@ -142,6 +174,67 @@ void small_matmul_batched_cpu_omp(const float* __restrict__ A, const float* __re
 
         // Compute (A×B)×(C×D)
         mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+    }
+}
+
+// CPU version of combined batched matrix multiplication
+void small_matmul_batched_combined_cpu(const float* matrix, float* out, int num_rows, int num_joints) {
+    const int mat_size = MAT_SIZE * MAT_SIZE;
+
+    for (int row = 0; row < num_rows; row++) {
+        const float* base = matrix + row * num_joints * mat_size;
+        float result[mat_size];
+
+        // Initialize result to identity matrix
+        for (int i = 0; i < mat_size; i++) {
+            result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
+        }
+
+        // Chain multiply all matrices: I × M0 × M1 × M2 × ...
+        for (int joint = 0; joint < num_joints; joint++) {
+            float temp[mat_size];
+            mul4x4_cpu(result, base + joint * mat_size, temp);
+            // Copy temp back to result for next iteration
+            for (int i = 0; i < mat_size; i++) {
+                result[i] = temp[i];
+            }
+        }
+
+        // Copy final result to output
+        for (int i = 0; i < mat_size; i++) {
+            out[row * mat_size + i] = result[i];
+        }
+    }
+}
+
+// OpenMP parallelized version of combined batched matrix multiplication
+void small_matmul_batched_combined_cpu_omp(const float* __restrict__ matrix, float* __restrict__ out, int num_rows, int num_joints) {
+    const int mat_size = MAT_SIZE * MAT_SIZE;
+
+#pragma omp parallel for schedule(static, 4096)
+    for (int row = 0; row < num_rows; row++) {
+        const float* base = matrix + row * num_joints * mat_size;
+        float result[mat_size];
+
+        // Initialize result to identity matrix
+        for (int i = 0; i < mat_size; i++) {
+            result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
+        }
+
+        // Chain multiply all matrices: I × M0 × M1 × M2 × ...
+        for (int joint = 0; joint < num_joints; joint++) {
+            float temp[mat_size];
+            mul4x4_cpu(result, base + joint * mat_size, temp);
+            // Copy temp back to result for next iteration
+            for (int i = 0; i < mat_size; i++) {
+                result[i] = temp[i];
+            }
+        }
+
+        // Copy final result to output
+        for (int i = 0; i < mat_size; i++) {
+            out[row * mat_size + i] = result[i];
+        }
     }
 }
 

@@ -9,10 +9,17 @@ __device__ __forceinline__ void mul4x4_one(const float* __restrict__ A, const fl
 // Kernel for batched 4x4 matrix multiplication: computes (A×B)×(C×D) for each row
 __global__ void small_matmul_batched(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows);
 
+// Kernel for combined batched matrix multiplication with arbitrary number of joints
+__global__ void small_matmul_batched_combined(const float* matrix, float* out, int num_rows, int num_joints);
+
 // CPU functions
 void mul4x4_cpu(const float* A, const float* B, float* C);
 void small_matmul_batched_cpu(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows);
 void small_matmul_batched_cpu_omp(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows);
+
+// CPU functions for combined (interleaved) data structure
+void small_matmul_batched_combined_cpu(const float* matrix, float* out, int num_rows, int num_joints);
+void small_matmul_batched_combined_cpu_omp(const float* matrix, float* out, int num_rows, int num_joints);
 
 // Helper functions
 void initialize_random(float* data, int size);

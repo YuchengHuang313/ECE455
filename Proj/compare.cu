@@ -1,12 +1,13 @@
-#include "small_matmul.cuh"
-
 #include <cuda_runtime.h>
 #include <omp.h>
 
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+
+#include "small_matmul.cuh"
 
 #define MAT_SIZE 4
 
@@ -29,8 +30,7 @@ int main(int argc, char** argv) {
 
     std::cout << "Batched 4x4 Matrix Multiplication Test" << std::endl;
     std::cout << "Number of matrices: " << num_matrices << std::endl;
-    std::cout << "Computing (A×B)×(C×D) for each set" << std::endl;
-    std::cout << std::endl;
+    std::cout << "========================================" << std::endl;
 
     // Calculate sizes
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
@@ -46,47 +46,42 @@ int main(int argc, char** argv) {
     float* h_out_gpu = new float[total_elements];
 
     // Initialize with random data
-    std::cout << "Initializing data..." << std::endl;
     initialize_random(h_A, total_elements);
     initialize_random(h_B, total_elements);
     initialize_random(h_C, total_elements);
     initialize_random(h_D, total_elements);
 
+    // ========== SEPARATE LAYOUT (A,B,C,D) ==========
+    std::cout << "\n[SEPARATE LAYOUT - A,B,C,D arrays]" << std::endl;
+
     // ========== CPU VERSION ==========
-    std::cout << "\nRunning CPU (single-threaded) version..." << std::endl;
     auto cpu_start = std::chrono::high_resolution_clock::now();
 
     small_matmul_batched_cpu(h_A, h_B, h_C, h_D, h_out_cpu, num_matrices);
 
     auto cpu_end = std::chrono::high_resolution_clock::now();
     auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
-    std::cout << "CPU Time: " << cpu_duration.count() / 1000.0 << " ms" << std::endl;
 
     // ========== CPU OMP VERSION ==========
     float* h_out_cpu_omp = new float[total_elements];
     int num_threads = omp_get_max_threads();
-    std::cout << "\nRunning CPU (OpenMP with " << num_threads << " threads) version..." << std::endl;
     auto cpu_omp_start = std::chrono::high_resolution_clock::now();
 
     small_matmul_batched_cpu_omp(h_A, h_B, h_C, h_D, h_out_cpu_omp, num_matrices);
 
     auto cpu_omp_end = std::chrono::high_resolution_clock::now();
     auto cpu_omp_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_omp_end - cpu_omp_start);
-    std::cout << "CPU OMP Time: " << cpu_omp_duration.count() / 1000.0 << " ms" << std::endl;
 
     // Free h_out_cpu_omp early since we'll use h_out_cpu for verification
     delete[] h_out_cpu_omp;
-    std::cout << "Freed h_out_cpu_omp (~" << bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
 
     // Save a subset of CPU results for verification, then free the full array
     const int verify_samples = std::min(10000, total_elements);  // Keep only 10k elements for verification
     float* h_verify_cpu = new float[verify_samples];
     std::memcpy(h_verify_cpu, h_out_cpu, verify_samples * sizeof(float));
     delete[] h_out_cpu;
-    std::cout << "Saved " << verify_samples << " elements for verification, freed h_out_cpu (~" << bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
 
     // ========== GPU VERSION ==========
-    std::cout << "\nRunning GPU version..." << std::endl;
 
     // Allocate device memory
     float *d_A, *d_B, *d_C, *d_D, *d_out;
@@ -111,7 +106,6 @@ int main(int argc, char** argv) {
     delete[] h_B;
     delete[] h_C;
     delete[] h_D;
-    std::cout << "Freed input arrays h_A, h_B, h_C, h_D (~" << 4 * bytes / (1024.0 * 1024.0) << " MB)" << std::endl;
 
     // Launch kernel
     const int threadsPerBlock = 64;
@@ -122,7 +116,7 @@ int main(int argc, char** argv) {
     if ((long long)numBlocks > maxGridDimX) {
         std::cerr << "Error: Number of blocks (" << numBlocks << ") exceeds maximum X grid dimension (" << maxGridDimX << ")" << std::endl;
         std::cerr << "This would require more than ~137 billion matrices. Consider batching your computation." << std::endl;
-        
+
         // Free memory and exit
         delete[] h_verify_cpu;
         delete[] h_out_gpu;
@@ -140,7 +134,7 @@ int main(int argc, char** argv) {
     dim3 blocks(numBlocks, 1);  // Use X dimension instead of Y
     dim3 threads(threadsPerBlock, 1);
     small_matmul_batched<<<blocks, threads>>>(d_A, d_B, d_C, d_D, d_out, num_matrices);
-    
+
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     auto kernel_end = std::chrono::high_resolution_clock::now();
@@ -156,34 +150,106 @@ int main(int argc, char** argv) {
     auto copy_back_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - kernel_end);
     auto gpu_total_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
 
-    std::cout << "GPU Total Time: " << gpu_total_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "  - Copy to device: " << copy_to_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "  - Kernel execution: " << kernel_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "  - Copy back: " << copy_back_duration.count() / 1000.0 << " ms" << std::endl;
-
     // ========== VERIFICATION ==========
-    std::cout << "\nVerifying results (using " << verify_samples << " sample elements)..." << std::endl;
     bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples, 1e-4f);
 
-    if (correct_gpu) {
-        std::cout << "✓ GPU results match CPU! Implementation is correct." << std::endl;
-    } else {
-        std::cout << "✗ GPU results DO NOT match!" << std::endl;
+    const int num_joints = 4;
+    const int total_combined_input = num_matrices * num_joints * elements_per_matrix;
+    const size_t combined_input_bytes = total_combined_input * sizeof(float);
+
+    // Allocate combined format and CPU reference output
+    float* h_matrices_combined = new float[total_combined_input];
+    float* h_out_cpu_combined = new float[total_elements];
+    float* h_out_cpu_omp_combined = new float[total_elements];
+    float* h_out_gpu_combined = new float[total_elements];
+
+    // Initialize with same random seed for reproducibility
+    initialize_random(h_matrices_combined, total_combined_input);
+
+    // Run CPU single-threaded version for combined format
+    auto cpu_combined_start = std::chrono::high_resolution_clock::now();
+
+    small_matmul_batched_combined_cpu(h_matrices_combined, h_out_cpu_combined, num_matrices, num_joints);
+
+    auto cpu_combined_end = std::chrono::high_resolution_clock::now();
+    auto cpu_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_combined_end - cpu_combined_start);
+
+    // Run CPU OpenMP version for combined format
+    auto cpu_omp_combined_start = std::chrono::high_resolution_clock::now();
+
+    small_matmul_batched_combined_cpu_omp(h_matrices_combined, h_out_cpu_omp_combined, num_matrices, num_joints);
+
+    auto cpu_omp_combined_end = std::chrono::high_resolution_clock::now();
+    auto cpu_omp_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_omp_combined_end - cpu_omp_combined_start);
+
+    // Allocate device memory for combined version
+    float *d_matrices_combined, *d_out_combined;
+    CUDA_CHECK(cudaMalloc(&d_matrices_combined, combined_input_bytes));
+    CUDA_CHECK(cudaMalloc(&d_out_combined, bytes));
+
+    // Copy data to device
+    auto gpu_combined_start = std::chrono::high_resolution_clock::now();
+    CUDA_CHECK(cudaMemcpy(d_matrices_combined, h_matrices_combined, combined_input_bytes, cudaMemcpyHostToDevice));
+    auto copy_combined_end = std::chrono::high_resolution_clock::now();
+
+    // Launch combined kernel
+    auto kernel_combined_start = std::chrono::high_resolution_clock::now();
+    small_matmul_batched_combined<<<blocks, threads>>>(d_matrices_combined, d_out_combined, num_matrices, num_joints);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    auto kernel_combined_end = std::chrono::high_resolution_clock::now();
+
+    // Copy result back
+    CUDA_CHECK(cudaMemcpy(h_out_gpu_combined, d_out_combined, bytes, cudaMemcpyDeviceToHost));
+    auto gpu_combined_end = std::chrono::high_resolution_clock::now();
+
+    // Timing
+    auto copy_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(copy_combined_end - gpu_combined_start);
+    auto kernel_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(kernel_combined_end - kernel_combined_start);
+    auto gpu_combined_total = std::chrono::duration_cast<std::chrono::microseconds>(gpu_combined_end - gpu_combined_start);
+
+    // Verify combined kernel correctness
+    bool correct_combined = compare_results(h_out_cpu_combined, h_out_gpu_combined, total_elements, 1e-3f);
+    bool correct_omp_combined = compare_results(h_out_cpu_combined, h_out_cpu_omp_combined, total_elements, 1e-5f);
+
+    if (!correct_combined || !correct_omp_combined) {
+        std::cerr << "ERROR: Combined layout verification failed!" << std::endl;
     }
 
-    // ========== PERFORMANCE SUMMARY ==========
-    std::cout << "\n========== PERFORMANCE SUMMARY ==========" << std::endl;
-    std::cout << "CPU (single-thread):  " << cpu_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "CPU (OpenMP " << num_threads << " threads): " << cpu_omp_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "GPU (kernel only):    " << kernel_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << "GPU (total w/ copy):  " << gpu_total_duration.count() / 1000.0 << " ms" << std::endl;
-    std::cout << std::endl;
+    // Cleanup combined
+    delete[] h_matrices_combined;
+    delete[] h_out_cpu_combined;
+    delete[] h_out_cpu_omp_combined;
+    delete[] h_out_gpu_combined;
+    CUDA_CHECK(cudaFree(d_matrices_combined));
+    CUDA_CHECK(cudaFree(d_out_combined));
 
-    std::cout << "Speedup vs single-threaded CPU:" << std::endl;
-    std::cout << "  OpenMP:            " << (double)cpu_duration.count() / cpu_omp_duration.count() << "x" << std::endl;
-    std::cout << "  GPU (kernel only): " << (double)cpu_duration.count() / kernel_duration.count() << "x" << std::endl;
-    std::cout << "  GPU (total):       " << (double)cpu_duration.count() / gpu_total_duration.count() << "x" << std::endl;
-    std::cout << std::endl;
+    // ========== PERFORMANCE SUMMARY ==========
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "         PERFORMANCE SUMMARY" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    std::cout << "\n[EXECUTION TIME]" << std::endl;
+    std::cout << std::fixed << std::setprecision(3);
+    std::cout << "                          Separate    Combined" << std::endl;
+    std::cout << "CPU (single-thread):      " << std::setw(7) << cpu_duration.count() / 1000.0 << " ms  " << std::setw(7)
+              << cpu_combined_duration.count() / 1000.0 << " ms" << std::endl;
+    std::cout << "CPU (OpenMP " << num_threads << " threads):    " << std::setw(7) << cpu_omp_duration.count() / 1000.0 << " ms  " << std::setw(7)
+              << cpu_omp_combined_duration.count() / 1000.0 << " ms" << std::endl;
+    std::cout << "GPU (kernel only):        " << std::setw(7) << kernel_duration.count() / 1000.0 << " ms  " << std::setw(7)
+              << kernel_combined_duration.count() / 1000.0 << " ms" << std::endl;
+    std::cout << "GPU (total w/ copy):      " << std::setw(7) << gpu_total_duration.count() / 1000.0 << " ms  " << std::setw(7)
+              << gpu_combined_total.count() / 1000.0 << " ms" << std::endl;
+
+    std::cout << "\n[SPEEDUP vs CPU Single-Threaded]" << std::endl;
+    std::cout << std::setprecision(2);
+    std::cout << "                          Separate    Combined" << std::endl;
+    std::cout << "OpenMP (" << num_threads << " threads):      " << std::setw(7) << (double)cpu_duration.count() / cpu_omp_duration.count()
+              << "x     " << std::setw(7) << (double)cpu_combined_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
+    std::cout << "GPU (kernel only):        " << std::setw(7) << (double)cpu_duration.count() / kernel_duration.count() << "x     " << std::setw(7)
+              << (double)cpu_combined_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
+    std::cout << "GPU (total):              " << std::setw(7) << (double)cpu_duration.count() / gpu_total_duration.count() << "x     " << std::setw(7)
+              << (double)cpu_combined_duration.count() / gpu_combined_total.count() << "x" << std::endl;
 
     // Calculate GFLOPS
     // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
@@ -192,11 +258,28 @@ int main(int argc, char** argv) {
     double cpu_gflops = (double)total_flops / (cpu_duration.count() * 1e3);  // GFLOPS
     double cpu_omp_gflops = (double)total_flops / (cpu_omp_duration.count() * 1e3);
     double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
+    double cpu_combined_gflops = (double)total_flops / (cpu_combined_duration.count() * 1e3);
+    double cpu_omp_combined_gflops = (double)total_flops / (cpu_omp_combined_duration.count() * 1e3);
+    double gpu_combined_gflops = (double)total_flops / (kernel_combined_duration.count() * 1e3);
 
-    std::cout << "Performance (GFLOPS):" << std::endl;
-    std::cout << "  CPU (single):  " << cpu_gflops << " GFLOPS" << std::endl;
-    std::cout << "  CPU (OpenMP):  " << cpu_omp_gflops << " GFLOPS" << std::endl;
-    std::cout << "  GPU (kernel):  " << gpu_gflops << " GFLOPS" << std::endl;
+    std::cout << "\n[PERFORMANCE (GFLOPS)]" << std::endl;
+    std::cout << std::setprecision(1);
+    std::cout << "                          Separate    Combined" << std::endl;
+    std::cout << "CPU (single):             " << std::setw(7) << cpu_gflops << "     " << std::setw(7) << cpu_combined_gflops << std::endl;
+    std::cout << "CPU (OpenMP):             " << std::setw(7) << cpu_omp_gflops << "     " << std::setw(7) << cpu_omp_combined_gflops << std::endl;
+    std::cout << "GPU (kernel):             " << std::setw(7) << gpu_gflops << "     " << std::setw(7) << gpu_combined_gflops << std::endl;
+
+    std::cout << "\n[LAYOUT COMPARISON]" << std::endl;
+    std::cout << std::setprecision(2);
+    std::cout << "Combined vs Separate speedup:" << std::endl;
+    std::cout << "  CPU single:        " << (double)cpu_duration.count() / cpu_combined_duration.count() << "x" << std::endl;
+    std::cout << "  CPU OMP:           " << (double)cpu_omp_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
+    std::cout << "  GPU (kernel):      " << (double)kernel_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
+
+    std::cout << "\n[VERIFICATION]" << std::endl;
+    std::cout << "Separate layout:   " << (correct_gpu ? "✓ PASS" : "✗ FAIL") << std::endl;
+    std::cout << "Combined layout:   " << (correct_combined && correct_omp_combined ? "✓ PASS" : "✗ FAIL") << std::endl;
+    std::cout << "========================================" << std::endl;
 
     // Cleanup (h_A, h_B, h_C, h_D, h_out_cpu_omp, h_out_cpu already freed earlier)
     delete[] h_verify_cpu;
