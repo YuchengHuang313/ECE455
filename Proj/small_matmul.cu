@@ -239,6 +239,8 @@ void small_matmul_batched_combined_cpu_omp(const float* __restrict__ matrix, flo
     }
 }
 
+// ========== ROBOTIC SPECIFIC ==========
+
 // ========== HELPER FUNCTIONS ==========
 
 // Helper function to initialize matrices with random values

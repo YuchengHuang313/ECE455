@@ -30,7 +30,10 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     float* h_matrices = new float[total_input_elements];
     float* h_out_cpu = new float[total_output_elements];
     float* h_out_cpu_omp = new float[total_output_elements];
-    float* h_out_gpu = new float[total_output_elements];
+
+    // Use pinned memory for GPU output to get better transfer performance
+    float* h_out_gpu;
+    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_output_elements * sizeof(float), cudaHostAllocDefault));
 
     // Initialize data
     initialize_random(h_matrices, total_input_elements);
@@ -72,6 +75,9 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     auto copy_duration = std::chrono::duration_cast<std::chrono::microseconds>(copy_end - gpu_start);
     auto kernel_duration = std::chrono::duration_cast<std::chrono::microseconds>(kernel_end - kernel_start);
     auto gpu_total_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
+    auto copy_back_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - kernel_end);
+    double transfer_time = (copy_duration.count() + copy_back_duration.count()) / 1000.0;
+    double total_time = kernel_duration.count() / 1000.0 + transfer_time;
 
     // Verify correctness (use adaptive tolerance for longer chains)
     // Longer chains accumulate more floating-point error (grows quadratically)
@@ -92,20 +98,33 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     // Print results (right-align numbers for better table alignment)
     std::cout << std::setw(6) << std::right << num_joints << " | " << std::setw(8) << std::fixed << std::setprecision(3)
               << cpu_duration.count() / 1000.0 << " | " << std::setw(8) << cpu_omp_duration.count() / 1000.0 << " | " << std::setw(8)
-              << kernel_duration.count() / 1000.0 << " | " << std::setw(6) << std::setprecision(1) << cpu_gflops << " | " << std::setw(6)
-              << cpu_omp_gflops << " | " << std::setw(6) << gpu_gflops << " | " << std::setw(7) << std::setprecision(2)
-              << (double)cpu_duration.count() / kernel_duration.count() << "x | " << (correct_cpu_omp && correct_gpu ? "✓" : "✗") << std::endl;
+              << kernel_duration.count() / 1000.0 << " | " << std::setw(9) << transfer_time << " | " << std::setw(10) << total_time << " | "
+              << std::setw(6) << std::setprecision(1) << cpu_gflops << " | " << std::setw(6) << cpu_omp_gflops << " | " << std::setw(6) << gpu_gflops
+              << " | " << std::setw(7) << std::setprecision(2) << (cpu_duration.count() / 1000.0) / total_time << "x | "
+              << (correct_cpu_omp && correct_gpu ? "✓" : "✗") << std::endl;
 
     // Cleanup
     delete[] h_matrices;
     delete[] h_out_cpu;
     delete[] h_out_cpu_omp;
-    delete[] h_out_gpu;
+    CUDA_CHECK(cudaFreeHost(h_out_gpu));
     CUDA_CHECK(cudaFree(d_matrices));
     CUDA_CHECK(cudaFree(d_out));
 }
 
 int main(int argc, char** argv) {
+    // Show usage if help requested
+    if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
+        std::cout << "Usage: " << argv[0] << " [num_matrices] [threads_per_block]" << std::endl;
+        std::cout << "\nTests matrix chain multiplication with varying chain lengths (2-32 joints)" << std::endl;
+        std::cout << "\nArguments:" << std::endl;
+        std::cout << "  num_matrices       Number of matrix sets to process (default: 500000)" << std::endl;
+        std::cout << "  threads_per_block  CUDA threads per block (default: 64)" << std::endl;
+        std::cout << "\nExample:" << std::endl;
+        std::cout << "  " << argv[0] << " 1000000 128" << std::endl;
+        return 0;
+    }
+
     int num_ops = 500000;
     int threadsPerBlock = 64;
 
@@ -133,10 +152,10 @@ int main(int argc, char** argv) {
     // Print header with proper column alignment matching data rows
     std::cout << std::right;
     std::cout << std::setw(6) << "Joints" << " | " << std::setw(8) << "CPU (ms)" << " | " << std::setw(8) << "OMP (ms)" << " | " << std::setw(8)
-              << "GPU (ms)" << " | " << std::setw(6) << "CPU GF" << " | " << std::setw(6) << "OMP GF" << " | " << std::setw(6) << "GPU GF" << " | "
-              << std::setw(8) << "Speedup" << " | "
+              << "GPU (ms)" << " | " << std::setw(9) << "Xfer (ms)" << " | " << std::setw(9) << "Total (ms)" << " | " << std::setw(6) << "CPU GF"
+              << " | " << std::setw(6) << "OMP GF" << " | " << std::setw(6) << "GPU GF" << " | " << std::setw(8) << "Speedup" << " | "
               << "OK" << std::endl;
-    std::cout << "-------|----------|----------|----------|--------|--------|--------|----------|----" << std::endl;
+    std::cout << "-------|----------|----------|----------|-----------|------------|--------|--------|--------|----------|----" << std::endl;
 
     // Test different numbers of joints
     int joint_configs[] = {2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20, 24, 32};
@@ -150,11 +169,15 @@ int main(int argc, char** argv) {
     std::cout << "Legend:" << std::endl;
     std::cout << "  Joints  = Number of 4x4 matrices in chain" << std::endl;
     std::cout << "  CPU/OMP = Single-threaded/OpenMP execution time" << std::endl;
-    std::cout << "  GPU     = GPU kernel execution time (excluding copy)" << std::endl;
+    std::cout << "  GPU     = GPU kernel execution time (compute only)" << std::endl;
+    std::cout << "  Xfer = Data transfer time (CPU→GPU + GPU→CPU copy time)" << std::endl;
+    std::cout << "  Total = GPU + Xfer (realistic total GPU time including transfers)" << std::endl;
     std::cout << "  GF      = GFLOPS (billions of floating-point ops/sec)" << std::endl;
-    std::cout << "  Speedup = GPU speedup vs single-threaded CPU" << std::endl;
+    std::cout << "  Speedup = CPU time / Total GPU time (realistic speedup)" << std::endl;
     std::cout << "  OK      = Verification passed (✓) or failed (✗)" << std::endl;
-    std::cout << "========================================" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Note: Speedup > 1.0 means GPU (including transfers) is faster than CPU" << std::endl;
+    std::cout << "=========================================" << std::endl;
 
     return 0;
 }
