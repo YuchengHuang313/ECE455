@@ -26,16 +26,15 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     const size_t input_bytes = total_input_elements * sizeof(float);
     const size_t output_bytes = total_output_elements * sizeof(float);
 
-    // Allocate memory
-    float* h_matrices = new float[total_input_elements];
+    // Allocate memory - use pinned memory for GPU transfers
+    float* h_matrices;
+    CUDA_CHECK(cudaHostAlloc(&h_matrices, input_bytes, cudaHostAllocDefault));
     float* h_out_cpu = new float[total_output_elements];
     float* h_out_cpu_omp = new float[total_output_elements];
 
     // Use pinned memory for GPU output to get better transfer performance
     float* h_out_gpu;
-    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_output_elements * sizeof(float), cudaHostAllocDefault));
-
-    // Initialize data
+    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_output_elements * sizeof(float), cudaHostAllocDefault));  // Initialize data
     initialize_random(h_matrices, total_input_elements);
 
     // ========== CPU SINGLE-THREADED ==========
@@ -104,7 +103,7 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
               << (correct_cpu_omp && correct_gpu ? "✓" : "✗") << std::endl;
 
     // Cleanup
-    delete[] h_matrices;
+    CUDA_CHECK(cudaFreeHost(h_matrices));
     delete[] h_out_cpu;
     delete[] h_out_cpu_omp;
     CUDA_CHECK(cudaFreeHost(h_out_gpu));

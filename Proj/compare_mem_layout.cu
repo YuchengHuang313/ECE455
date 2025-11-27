@@ -72,18 +72,17 @@ int main(int argc, char** argv) {
     const int total_elements = num_matrices * elements_per_matrix;
     const size_t bytes = total_elements * sizeof(float);
 
-    // Allocate host memory
-    float* h_A = new float[total_elements];
-    float* h_B = new float[total_elements];
-    float* h_C = new float[total_elements];
-    float* h_D = new float[total_elements];
+    // Allocate host memory - use pinned memory for GPU transfers
+    float *h_A, *h_B, *h_C, *h_D;
+    CUDA_CHECK(cudaHostAlloc(&h_A, bytes, cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc(&h_B, bytes, cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc(&h_C, bytes, cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc(&h_D, bytes, cudaHostAllocDefault));
     float* h_out_cpu = new float[total_elements];
 
     // Use pinned memory for GPU output to get better transfer performance
     float* h_out_gpu;
-    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_elements * sizeof(float), cudaHostAllocDefault));
-
-    // Initialize with random data
+    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_elements * sizeof(float), cudaHostAllocDefault));  // Initialize with random data
     initialize_random(h_A, total_elements);
     initialize_random(h_B, total_elements);
     initialize_random(h_C, total_elements);
@@ -143,12 +142,10 @@ int main(int argc, char** argv) {
     std::cout << "Separate H->D: " << copy_to_duration_us / 1000.0 << " ms (" << std::setprecision(1) << copy_to_bandwidth << " GB/s)" << std::endl;
 
     // Free input host arrays - no longer needed after copying to device
-    delete[] h_A;
-    delete[] h_B;
-    delete[] h_C;
-    delete[] h_D;
-
-    // Launch kernel
+    CUDA_CHECK(cudaFreeHost(h_A));
+    CUDA_CHECK(cudaFreeHost(h_B));
+    CUDA_CHECK(cudaFreeHost(h_C));
+    CUDA_CHECK(cudaFreeHost(h_D));  // Launch kernel
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
 
     // Check if we exceed max grid dimension on X axis (2^31-1 for modern GPUs)
@@ -223,15 +220,15 @@ int main(int argc, char** argv) {
     const size_t combined_input_bytes = total_combined_input * sizeof(float);
 
     // Allocate combined format and CPU reference output
-    float* h_matrices_combined = new float[total_combined_input];
+    float* h_matrices_combined;
+    CUDA_CHECK(cudaHostAlloc(&h_matrices_combined, combined_input_bytes, cudaHostAllocDefault));
     float* h_out_cpu_combined = new float[total_elements];
     float* h_out_cpu_omp_combined = new float[total_elements];
 
     // Use pinned memory for GPU output to get better transfer performance
     float* h_out_gpu_combined;
-    CUDA_CHECK(cudaHostAlloc(&h_out_gpu_combined, total_elements * sizeof(float), cudaHostAllocDefault));
-
-    // Initialize with same random seed for reproducibility
+    CUDA_CHECK(cudaHostAlloc(&h_out_gpu_combined, total_elements * sizeof(float),
+                             cudaHostAllocDefault));  // Initialize with same random seed for reproducibility
     initialize_random(h_matrices_combined, total_combined_input);
 
     // Run CPU single-threaded version for combined format
@@ -362,7 +359,7 @@ int main(int argc, char** argv) {
     std::cout << "========================================" << std::endl;
 
     // Cleanup combined
-    delete[] h_matrices_combined;
+    CUDA_CHECK(cudaFreeHost(h_matrices_combined));
     delete[] h_out_cpu_combined;
     delete[] h_out_cpu_omp_combined;
     CUDA_CHECK(cudaFreeHost(h_out_gpu_combined));
