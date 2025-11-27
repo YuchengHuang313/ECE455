@@ -139,13 +139,16 @@ int main(int argc, char** argv) {
 
     auto copy_to_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(copy_to_device_end - gpu_start).count();
     double copy_to_bandwidth = (bytes * 4 / (1024.0 * 1024.0 * 1024.0)) / (copy_to_duration_us / 1e6);
-    std::cout << "Separate H->D: " << copy_to_duration_us / 1000.0 << " ms (" << std::setprecision(1) << copy_to_bandwidth << " GB/s)" << std::endl;
+    std::cout << "Separate H->D: " << std::fixed << std::setprecision(2) << copy_to_duration_us / 1000.0 << " ms (" << copy_to_bandwidth << " GB/s)"
+              << std::endl;
 
     // Free input host arrays - no longer needed after copying to device
     CUDA_CHECK(cudaFreeHost(h_A));
     CUDA_CHECK(cudaFreeHost(h_B));
     CUDA_CHECK(cudaFreeHost(h_C));
-    CUDA_CHECK(cudaFreeHost(h_D));  // Launch kernel
+    CUDA_CHECK(cudaFreeHost(h_D));
+
+    // Launch kernel
     int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
 
     // Check if we exceed max grid dimension on X axis (2^31-1 for modern GPUs)
@@ -183,8 +186,8 @@ int main(int argc, char** argv) {
 
     auto copy_back_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - kernel_end).count();
     double copy_back_bandwidth = (bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_back_duration_us / 1e6);
-    std::cout << "Separate D->H: " << copy_back_duration_us / 1000.0 << " ms (" << std::setprecision(1) << copy_back_bandwidth << " GB/s)"
-              << std::endl;
+    std::cout << "Separate D->H: " << std::fixed << std::setprecision(2) << copy_back_duration_us / 1000.0 << " ms (" << copy_back_bandwidth
+              << " GB/s)" << std::endl;
     std::cout << std::endl;
 
     // Timing breakdown
@@ -255,8 +258,8 @@ int main(int argc, char** argv) {
 
     auto copy_combined_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(copy_combined_end - gpu_combined_start).count();
     double copy_combined_to_bandwidth = (combined_input_bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_combined_duration_us / 1e6);
-    std::cout << "Combined H->D: " << copy_combined_duration_us / 1000.0 << " ms (" << std::setprecision(1) << copy_combined_to_bandwidth << " GB/s)"
-              << std::endl;
+    std::cout << "Combined H->D: " << std::fixed << std::setprecision(2) << copy_combined_duration_us / 1000.0 << " ms ("
+              << copy_combined_to_bandwidth << " GB/s)" << std::endl;
 
     // Launch combined kernel
     auto kernel_combined_start = std::chrono::high_resolution_clock::now();
@@ -271,8 +274,8 @@ int main(int argc, char** argv) {
 
     auto copy_combined_back_us = std::chrono::duration_cast<std::chrono::microseconds>(gpu_combined_end - kernel_combined_end).count();
     double copy_combined_back_bandwidth = (bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_combined_back_us / 1e6);
-    std::cout << "Combined D->H: " << copy_combined_back_us / 1000.0 << " ms (" << std::setprecision(1) << copy_combined_back_bandwidth << " GB/s)"
-              << std::endl;
+    std::cout << "Combined D->H: " << std::fixed << std::setprecision(2) << copy_combined_back_us / 1000.0 << " ms (" << copy_combined_back_bandwidth
+              << " GB/s)" << std::endl;
     std::cout << std::endl;
 
     // Timing
