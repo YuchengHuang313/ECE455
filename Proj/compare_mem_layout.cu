@@ -1,9 +1,11 @@
 #include <cuda_runtime.h>
 #include <omp.h>
+#include <sys/stat.h>
 
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -360,6 +362,35 @@ int main(int argc, char** argv) {
         std::cout << "Best GPU total time: " << std::setprecision(3) << combined_total_time << " ms (Combined layout)" << std::endl;
     }
     std::cout << "========================================" << std::endl;
+
+    // ========== WRITE TO CSV FILE ==========
+    const char* csv_filename = "compare_mem_layout_output.csv";
+
+    // Delete old file and create fresh (overwrite mode)
+    std::remove(csv_filename);
+
+    std::ofstream csv(csv_filename);
+    if (csv.is_open()) {
+        // Always write header for fresh file
+        csv << "num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,xfer_ms,total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup\n";
+
+        // Write data rows
+        csv << std::fixed << std::setprecision(3);
+        csv << num_matrices << "," << threadsPerBlock << ",Separate," << cpu_duration.count() / 1000.0 << "," << cpu_omp_duration.count() / 1000.0
+            << "," << kernel_duration.count() / 1000.0 << "," << separate_xfer_time << "," << separate_total_time << "," << std::setprecision(1)
+            << cpu_gflops << "," << cpu_omp_gflops << "," << gpu_gflops << "," << std::setprecision(2)
+            << (cpu_duration.count() / 1000.0) / separate_total_time << "\n";
+
+        csv << num_matrices << "," << threadsPerBlock << ",Combined," << cpu_combined_duration.count() / 1000.0 << ","
+            << cpu_omp_combined_duration.count() / 1000.0 << "," << kernel_combined_duration.count() / 1000.0 << "," << combined_xfer_time << ","
+            << combined_total_time << "," << std::setprecision(1) << cpu_combined_gflops << "," << cpu_omp_combined_gflops << ","
+            << gpu_combined_gflops << "," << std::setprecision(2) << (cpu_combined_duration.count() / 1000.0) / combined_total_time << "\n";
+
+        csv.close();
+        std::cout << "\nData written to: " << csv_filename << std::endl;
+    } else {
+        std::cerr << "Warning: Could not open " << csv_filename << " for writing" << std::endl;
+    }
 
     // Cleanup combined
     CUDA_CHECK(cudaFreeHost(h_matrices_combined));

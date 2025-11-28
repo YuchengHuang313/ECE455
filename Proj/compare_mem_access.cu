@@ -1,7 +1,9 @@
 #include <cuda_runtime.h>
+#include <sys/stat.h>
 
 #include <chrono>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 
@@ -132,6 +134,30 @@ int main(int argc, char** argv) {
     std::cout << "  H→D       = Host to Device transfer" << std::endl;
     std::cout << "  D→H       = Device to Host transfer" << std::endl;
     std::cout << "========================================" << std::endl;
+
+    // ========== WRITE TO CSV FILE ==========
+    const char* csv_filename = "compare_mem_access_output.csv";
+
+    // Delete old file and create fresh (overwrite mode)
+    std::remove(csv_filename);
+
+    std::ofstream csv(csv_filename);
+    if (csv.is_open()) {
+        // Always write header for fresh file
+        csv << "size_mb,memory_type,h2d_ms,h2d_gbps,d2h_ms,d2h_gbps\n";
+
+        // Write data rows
+        csv << std::fixed << std::setprecision(2);
+        csv << size_mb << ",Pageable," << pageable_h2d_us / 1000.0 << "," << pageable_h2d_bw << "," << pageable_d2h_us / 1000.0 << ","
+            << pageable_d2h_bw << "\n";
+        csv << size_mb << ",Pinned," << pinned_h2d_us / 1000.0 << "," << pinned_h2d_bw << "," << pinned_d2h_us / 1000.0 << "," << pinned_d2h_bw
+            << "\n";
+        csv.close();
+
+        std::cout << "\nData written to: " << csv_filename << std::endl;
+    } else {
+        std::cerr << "Warning: Could not open " << csv_filename << " for writing" << std::endl;
+    }
 
     // Cleanup
     delete[] h_pageable;

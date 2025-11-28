@@ -2,12 +2,17 @@
 #include <omp.h>
 
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 
 #include "small_matmul.cuh"
 
 #define MAT_SIZE 4
+
+// CSV output file path
+const char* csv_filename = "compare_variable_joints_output.csv";
 
 // Check CUDA errors
 #define CUDA_CHECK(call)                                                                                                   \
@@ -18,6 +23,26 @@
             exit(EXIT_FAILURE);                                                                                            \
         }                                                                                                                  \
     } while (0)
+
+void write_csv_header() {
+    std::ofstream file(csv_filename);
+    if (file.is_open()) {
+        file << "num_ops,num_joints,threads_per_block,cpu_ms,omp_ms,gpu_kernel_ms,transfer_ms,total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup,"
+                "correct\n";
+        file.close();
+    }
+}
+
+void append_csv_result(int num_ops, int num_joints, int threadsPerBlock, double cpu_ms, double omp_ms, double gpu_kernel_ms, double transfer_ms,
+                       double total_ms, double cpu_gflops, double omp_gflops, double gpu_gflops, double speedup, bool correct) {
+    std::ofstream file(csv_filename, std::ios::app);
+    if (file.is_open()) {
+        file << num_ops << "," << num_joints << "," << threadsPerBlock << "," << std::fixed << std::setprecision(3) << cpu_ms << "," << omp_ms << ","
+             << gpu_kernel_ms << "," << transfer_ms << "," << total_ms << "," << std::setprecision(2) << cpu_gflops << "," << omp_gflops << ","
+             << gpu_gflops << "," << speedup << "," << (correct ? "1" : "0") << "\n";
+        file.close();
+    }
+}
 
 void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
@@ -95,12 +120,21 @@ void test_num_joints(int num_ops, int num_joints, int threadsPerBlock) {
     double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
 
     // Print results (right-align numbers for better table alignment)
-    std::cout << std::setw(6) << std::right << num_joints << " | " << std::setw(8) << std::fixed << std::setprecision(3)
-              << cpu_duration.count() / 1000.0 << " | " << std::setw(8) << cpu_omp_duration.count() / 1000.0 << " | " << std::setw(8)
-              << kernel_duration.count() / 1000.0 << " | " << std::setw(9) << transfer_time << " | " << std::setw(10) << total_time << " | "
-              << std::setw(6) << std::setprecision(1) << cpu_gflops << " | " << std::setw(6) << cpu_omp_gflops << " | " << std::setw(6) << gpu_gflops
-              << " | " << std::setw(7) << std::setprecision(2) << (cpu_duration.count() / 1000.0) / total_time << "x | "
-              << (correct_cpu_omp && correct_gpu ? "✓" : "✗") << std::endl;
+    double cpu_ms = cpu_duration.count() / 1000.0;
+    double omp_ms = cpu_omp_duration.count() / 1000.0;
+    double gpu_kernel_ms = kernel_duration.count() / 1000.0;
+    double speedup = cpu_ms / total_time;
+    bool correct = correct_cpu_omp && correct_gpu;
+
+    std::cout << std::setw(6) << std::right << num_joints << " | " << std::setw(8) << std::fixed << std::setprecision(3) << cpu_ms << " | "
+              << std::setw(8) << omp_ms << " | " << std::setw(8) << gpu_kernel_ms << " | " << std::setw(9) << transfer_time << " | " << std::setw(10)
+              << total_time << " | " << std::setw(6) << std::setprecision(1) << cpu_gflops << " | " << std::setw(6) << cpu_omp_gflops << " | "
+              << std::setw(6) << gpu_gflops << " | " << std::setw(7) << std::setprecision(2) << speedup << "x | " << (correct ? "✓" : "✗")
+              << std::endl;
+
+    // Write to CSV
+    append_csv_result(num_ops, num_joints, threadsPerBlock, cpu_ms, omp_ms, gpu_kernel_ms, transfer_time, total_time, cpu_gflops, cpu_omp_gflops,
+                      gpu_gflops, speedup, correct);
 
     // Cleanup
     CUDA_CHECK(cudaFreeHost(h_matrices));
@@ -136,6 +170,10 @@ int main(int argc, char** argv) {
 
     int num_threads = omp_get_max_threads();
 
+    // Clear CSV file at start of run
+    std::remove(csv_filename);
+    write_csv_header();
+
     std::cout << "========================================" << std::endl;
     std::cout << "  Matrix Chain Multiplication Test" << std::endl;
     std::cout << "  Number of matrix sets: " << num_ops << std::endl;
@@ -157,7 +195,7 @@ int main(int argc, char** argv) {
     std::cout << "-------|----------|----------|----------|-----------|------------|--------|--------|--------|----------|----" << std::endl;
 
     // Test different numbers of joints
-    int joint_configs[] = {2, 3, 4, 5, 6, 7, 8, 10, 12, 16, 20, 24, 32};
+    int joint_configs[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32};
     int num_configs = sizeof(joint_configs) / sizeof(joint_configs[0]);
 
     for (int i = 0; i < num_configs; i++) {

@@ -1,0 +1,3 @@
+num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,xfer_ms,total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup
+2000000,128,Separate,53.357,17.933,3.103,55.043,58.146,14.4,42.8,247.5,0.92
+2000000,128,Combined,72.25,12.63,1.80,60.91,62.71,10.6,60.8,426.4,1.15
