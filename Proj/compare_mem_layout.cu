@@ -94,21 +94,21 @@ int main(int argc, char** argv) {
     std::cout << "\n[SEPARATE LAYOUT - A,B,C,D arrays]" << std::endl;
 
     // ========== CPU VERSION ==========
-    auto cpu_start = std::chrono::high_resolution_clock::now();
+    auto t_cpu_start = std::chrono::high_resolution_clock::now();
 
     small_matmul_batched_cpu(h_A, h_B, h_C, h_D, h_out_cpu, num_matrices);
 
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_end - cpu_start);
+    auto t_cpu_end = std::chrono::high_resolution_clock::now();
+    auto dur_cpu = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_end - t_cpu_start);
 
     // ========== CPU OMP VERSION ==========
     float* h_out_cpu_omp = new float[total_elements];
-    auto cpu_omp_start = std::chrono::high_resolution_clock::now();
+    auto t_cpu_omp_start = std::chrono::high_resolution_clock::now();
 
     small_matmul_batched_cpu_omp(h_A, h_B, h_C, h_D, h_out_cpu_omp, num_matrices);
 
-    auto cpu_omp_end = std::chrono::high_resolution_clock::now();
-    auto cpu_omp_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_omp_end - cpu_omp_start);
+    auto t_cpu_omp_end = std::chrono::high_resolution_clock::now();
+    auto dur_cpu_omp = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_omp_end - t_cpu_omp_start);
 
     // Free h_out_cpu_omp early since we'll use h_out_cpu for verification
     delete[] h_out_cpu_omp;
@@ -130,19 +130,18 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMalloc(&d_out, bytes));
 
     // Copy data to device
-    auto gpu_start = std::chrono::high_resolution_clock::now();
+    auto t_h2d_start = std::chrono::high_resolution_clock::now();
 
     CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_C, h_C, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_D, h_D, bytes, cudaMemcpyHostToDevice));
 
-    auto copy_to_device_end = std::chrono::high_resolution_clock::now();
+    auto t_h2d_end = std::chrono::high_resolution_clock::now();
 
-    auto copy_to_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(copy_to_device_end - gpu_start).count();
-    double copy_to_bandwidth = (bytes * 4 / (1024.0 * 1024.0 * 1024.0)) / (copy_to_duration_us / 1e6);
-    std::cout << "Separate H->D: " << std::fixed << std::setprecision(2) << copy_to_duration_us / 1000.0 << " ms (" << copy_to_bandwidth << " GB/s)"
-              << std::endl;
+    auto us_h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_end - t_h2d_start).count();
+    double bw_h2d = (bytes * 4 / (1024.0 * 1024.0 * 1024.0)) / (us_h2d / 1e6);
+    std::cout << "Separate H->D: " << std::fixed << std::setprecision(2) << us_h2d / 1000.0 << " ms (" << bw_h2d << " GB/s)" << std::endl;
 
     // Free input host arrays - no longer needed after copying to device
     CUDA_CHECK(cudaFreeHost(h_A));
@@ -170,7 +169,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    auto kernel_start = std::chrono::high_resolution_clock::now();
+    auto t_kernel_start = std::chrono::high_resolution_clock::now();
 
     // Launch kernel directly
     dim3 blocks(numBlocks, 1);  // Use X dimension instead of Y
@@ -179,24 +178,23 @@ int main(int argc, char** argv) {
 
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    auto kernel_end = std::chrono::high_resolution_clock::now();
+    auto t_kernel_end = std::chrono::high_resolution_clock::now();
 
     // Copy result back
     CUDA_CHECK(cudaMemcpy(h_out_gpu, d_out, bytes, cudaMemcpyDeviceToHost));
 
-    auto gpu_end = std::chrono::high_resolution_clock::now();
+    auto t_d2h_end = std::chrono::high_resolution_clock::now();
 
-    auto copy_back_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - kernel_end).count();
-    double copy_back_bandwidth = (bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_back_duration_us / 1e6);
-    std::cout << "Separate D->H: " << std::fixed << std::setprecision(2) << copy_back_duration_us / 1000.0 << " ms (" << copy_back_bandwidth
-              << " GB/s)" << std::endl;
+    auto us_d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_kernel_end).count();
+    double bw_d2h = (bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h / 1e6);
+    std::cout << "Separate D->H: " << std::fixed << std::setprecision(2) << us_d2h / 1000.0 << " ms (" << bw_d2h << " GB/s)" << std::endl;
     std::cout << std::endl;
 
     // Timing breakdown
-    auto copy_to_duration = std::chrono::duration_cast<std::chrono::microseconds>(copy_to_device_end - gpu_start);
-    auto kernel_duration = std::chrono::duration_cast<std::chrono::microseconds>(kernel_end - kernel_start);
-    auto copy_back_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - kernel_end);
-    auto gpu_total_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_end - gpu_start);
+    auto dur_h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_end - t_h2d_start);
+    auto dur_kernel = std::chrono::duration_cast<std::chrono::microseconds>(t_kernel_end - t_kernel_start);
+    auto dur_d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_kernel_end);
+    auto dur_gpu_total = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_h2d_start);
 
     // ========== VERIFICATION ==========
     bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples, 1e-4f);
@@ -237,16 +235,16 @@ int main(int argc, char** argv) {
     initialize_random(h_matrices_combined, total_combined_input);
 
     // Run CPU single-threaded version for combined format
-    auto cpu_combined_start = std::chrono::high_resolution_clock::now();
+    auto t_cpu_comb_start = std::chrono::high_resolution_clock::now();
     small_matmul_batched_combined_cpu(h_matrices_combined, h_out_cpu_combined, num_matrices, num_joints);
-    auto cpu_combined_end = std::chrono::high_resolution_clock::now();
-    auto cpu_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_combined_end - cpu_combined_start);
+    auto t_cpu_comb_end = std::chrono::high_resolution_clock::now();
+    auto dur_cpu_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_comb_end - t_cpu_comb_start);
 
     // Run CPU OpenMP version for combined format
-    auto cpu_omp_combined_start = std::chrono::high_resolution_clock::now();
+    auto t_cpu_omp_comb_start = std::chrono::high_resolution_clock::now();
     small_matmul_batched_combined_cpu_omp(h_matrices_combined, h_out_cpu_omp_combined, num_matrices, num_joints);
-    auto cpu_omp_combined_end = std::chrono::high_resolution_clock::now();
-    auto cpu_omp_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(cpu_omp_combined_end - cpu_omp_combined_start);
+    auto t_cpu_omp_comb_end = std::chrono::high_resolution_clock::now();
+    auto dur_cpu_omp_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_omp_comb_end - t_cpu_omp_comb_start);
 
     // Allocate device memory for combined version
     float *d_matrices_combined, *d_out_combined;
@@ -254,36 +252,34 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMalloc(&d_out_combined, bytes));
 
     // Copy data to device
-    auto gpu_combined_start = std::chrono::high_resolution_clock::now();
+    auto t_h2d_comb_start = std::chrono::high_resolution_clock::now();
     CUDA_CHECK(cudaMemcpy(d_matrices_combined, h_matrices_combined, combined_input_bytes, cudaMemcpyHostToDevice));
-    auto copy_combined_end = std::chrono::high_resolution_clock::now();
+    auto t_h2d_comb_end = std::chrono::high_resolution_clock::now();
 
-    auto copy_combined_duration_us = std::chrono::duration_cast<std::chrono::microseconds>(copy_combined_end - gpu_combined_start).count();
-    double copy_combined_to_bandwidth = (combined_input_bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_combined_duration_us / 1e6);
-    std::cout << "Combined H->D: " << std::fixed << std::setprecision(2) << copy_combined_duration_us / 1000.0 << " ms ("
-              << copy_combined_to_bandwidth << " GB/s)" << std::endl;
+    auto us_h2d_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_comb_end - t_h2d_comb_start).count();
+    double bw_h2d_comb = (combined_input_bytes / (1024.0 * 1024.0 * 1024.0)) / (us_h2d_comb / 1e6);
+    std::cout << "Combined H->D: " << std::fixed << std::setprecision(2) << us_h2d_comb / 1000.0 << " ms (" << bw_h2d_comb << " GB/s)" << std::endl;
 
     // Launch combined kernel
-    auto kernel_combined_start = std::chrono::high_resolution_clock::now();
+    auto t_kernel_comb_start = std::chrono::high_resolution_clock::now();
     small_matmul_batched_combined<<<blocks, threads>>>(d_matrices_combined, d_out_combined, num_matrices, num_joints);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
-    auto kernel_combined_end = std::chrono::high_resolution_clock::now();
+    auto t_kernel_comb_end = std::chrono::high_resolution_clock::now();
 
     // Copy result back
     CUDA_CHECK(cudaMemcpy(h_out_gpu_combined, d_out_combined, bytes, cudaMemcpyDeviceToHost));
-    auto gpu_combined_end = std::chrono::high_resolution_clock::now();
+    auto t_d2h_comb_end = std::chrono::high_resolution_clock::now();
 
-    auto copy_combined_back_us = std::chrono::duration_cast<std::chrono::microseconds>(gpu_combined_end - kernel_combined_end).count();
-    double copy_combined_back_bandwidth = (bytes / (1024.0 * 1024.0 * 1024.0)) / (copy_combined_back_us / 1e6);
-    std::cout << "Combined D->H: " << std::fixed << std::setprecision(2) << copy_combined_back_us / 1000.0 << " ms (" << copy_combined_back_bandwidth
-              << " GB/s)" << std::endl;
+    auto us_d2h_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_kernel_comb_end).count();
+    double bw_d2h_comb = (bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h_comb / 1e6);
+    std::cout << "Combined D->H: " << std::fixed << std::setprecision(2) << us_d2h_comb / 1000.0 << " ms (" << bw_d2h_comb << " GB/s)" << std::endl;
     std::cout << std::endl;
 
     // Timing
-    auto copy_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(copy_combined_end - gpu_combined_start);
-    auto kernel_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(kernel_combined_end - kernel_combined_start);
-    auto gpu_combined_total = std::chrono::duration_cast<std::chrono::microseconds>(gpu_combined_end - gpu_combined_start);
+    auto dur_h2d_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_comb_end - t_h2d_comb_start);
+    auto dur_kernel_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_kernel_comb_end - t_kernel_comb_start);
+    auto dur_gpu_total_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_h2d_comb_start);
 
     // Verify combined kernel correctness
     bool correct_combined = compare_results(h_out_cpu_combined, h_out_gpu_combined, total_elements, 1e-3f);
@@ -293,12 +289,12 @@ int main(int argc, char** argv) {
     // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
     // We do 3 multiplications per set: A×B, C×D, (A×B)×(C×D)
     long long total_flops = (long long)num_matrices * 3 * 128;
-    double cpu_gflops = (double)total_flops / (cpu_duration.count() * 1e3);
-    double cpu_omp_gflops = (double)total_flops / (cpu_omp_duration.count() * 1e3);
-    double gpu_gflops = (double)total_flops / (kernel_duration.count() * 1e3);
-    double cpu_combined_gflops = (double)total_flops / (cpu_combined_duration.count() * 1e3);
-    double cpu_omp_combined_gflops = (double)total_flops / (cpu_omp_combined_duration.count() * 1e3);
-    double gpu_combined_gflops = (double)total_flops / (kernel_combined_duration.count() * 1e3);
+    double gflops_cpu = (double)total_flops / (dur_cpu.count() * 1e3);
+    double gflops_cpu_omp = (double)total_flops / (dur_cpu_omp.count() * 1e3);
+    double gflops_gpu = (double)total_flops / (dur_kernel.count() * 1e3);
+    double gflops_cpu_comb = (double)total_flops / (dur_cpu_comb.count() * 1e3);
+    double gflops_cpu_omp_comb = (double)total_flops / (dur_cpu_omp_comb.count() * 1e3);
+    double gflops_gpu_comb = (double)total_flops / (dur_kernel_comb.count() * 1e3);
 
     // ========== PRINT RESULTS TABLE ==========
     std::cout << std::endl;
@@ -315,25 +311,23 @@ int main(int argc, char** argv) {
               << std::endl;
 
     // Separate layout row
-    double separate_xfer_time = (copy_to_duration.count() + copy_back_duration.count()) / 1000.0;
-    double separate_total_time = kernel_duration.count() / 1000.0 + separate_xfer_time;
-    std::cout << std::setw(10) << std::right << "Separate" << " | " << std::setw(10) << std::fixed << std::setprecision(3)
-              << cpu_duration.count() / 1000.0 << " | " << std::setw(10) << cpu_omp_duration.count() / 1000.0 << " | " << std::setw(10)
-              << kernel_duration.count() / 1000.0 << " | " << std::setw(10) << separate_xfer_time << " | " << std::setw(11) << separate_total_time
-              << " | " << std::setw(8) << std::setprecision(1) << cpu_gflops << " | " << std::setw(8) << cpu_omp_gflops << " | " << std::setw(8)
-              << gpu_gflops << " | " << std::setw(9) << std::setprecision(2) << (cpu_duration.count() / 1000.0) / separate_total_time << "x | "
-              << (correct_gpu ? "  ✓" : "  ✗") << std::endl;
+    double ms_sep_xfer = (dur_h2d.count() + dur_d2h.count()) / 1000.0;
+    double ms_sep_total = dur_kernel.count() / 1000.0 + ms_sep_xfer;
+    std::cout << std::setw(10) << std::right << "Separate" << " | " << std::setw(10) << std::fixed << std::setprecision(3) << dur_cpu.count() / 1000.0
+              << " | " << std::setw(10) << dur_cpu_omp.count() / 1000.0 << " | " << std::setw(10) << dur_kernel.count() / 1000.0 << " | "
+              << std::setw(10) << ms_sep_xfer << " | " << std::setw(11) << ms_sep_total << " | " << std::setw(8) << std::setprecision(1) << gflops_cpu
+              << " | " << std::setw(8) << gflops_cpu_omp << " | " << std::setw(8) << gflops_gpu << " | " << std::setw(9) << std::setprecision(2)
+              << (dur_cpu.count() / 1000.0) / ms_sep_total << "x | " << (correct_gpu ? "  ✓" : "  ✗") << std::endl;
 
     // Combined layout row
-    auto copy_back_combined_duration = std::chrono::duration_cast<std::chrono::microseconds>(gpu_combined_end - kernel_combined_end);
-    double combined_xfer_time = (copy_combined_duration.count() + copy_back_combined_duration.count()) / 1000.0;
-    double combined_total_time = kernel_combined_duration.count() / 1000.0 + combined_xfer_time;
+    auto dur_d2h_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_kernel_comb_end);
+    double ms_comb_xfer = (dur_h2d_comb.count() + dur_d2h_comb.count()) / 1000.0;
+    double ms_comb_total = dur_kernel_comb.count() / 1000.0 + ms_comb_xfer;
     std::cout << std::setw(10) << std::right << "Combined" << " | " << std::setw(10) << std::fixed << std::setprecision(3)
-              << cpu_combined_duration.count() / 1000.0 << " | " << std::setw(10) << cpu_omp_combined_duration.count() / 1000.0 << " | "
-              << std::setw(10) << kernel_combined_duration.count() / 1000.0 << " | " << std::setw(10) << combined_xfer_time << " | " << std::setw(11)
-              << combined_total_time << " | " << std::setw(8) << std::setprecision(1) << cpu_combined_gflops << " | " << std::setw(8)
-              << cpu_omp_combined_gflops << " | " << std::setw(8) << gpu_combined_gflops << " | " << std::setw(9) << std::setprecision(2)
-              << (cpu_combined_duration.count() / 1000.0) / combined_total_time << "x | "
+              << dur_cpu_comb.count() / 1000.0 << " | " << std::setw(10) << dur_cpu_omp_comb.count() / 1000.0 << " | " << std::setw(10)
+              << dur_kernel_comb.count() / 1000.0 << " | " << std::setw(10) << ms_comb_xfer << " | " << std::setw(11) << ms_comb_total << " | "
+              << std::setw(8) << std::setprecision(1) << gflops_cpu_comb << " | " << std::setw(8) << gflops_cpu_omp_comb << " | " << std::setw(8)
+              << gflops_gpu_comb << " | " << std::setw(9) << std::setprecision(2) << (dur_cpu_comb.count() / 1000.0) / ms_comb_total << "x | "
               << (correct_combined && correct_omp_combined ? "  ✓" : "  ✗") << std::endl;
 
     std::cout << std::endl;
@@ -349,17 +343,17 @@ int main(int argc, char** argv) {
 
     std::cout << std::endl;
     std::cout << "Performance improvement (Combined vs Separate):" << std::endl;
-    std::cout << "  CPU single:  " << std::setprecision(2) << (double)cpu_duration.count() / cpu_combined_duration.count() << "x" << std::endl;
-    std::cout << "  CPU OMP:     " << (double)cpu_omp_duration.count() / cpu_omp_combined_duration.count() << "x" << std::endl;
-    std::cout << "  GPU kernel:  " << (double)kernel_duration.count() / kernel_combined_duration.count() << "x" << std::endl;
-    std::cout << "  GPU total:   " << separate_total_time / combined_total_time << "x" << std::endl;
+    std::cout << "  CPU single:  " << std::setprecision(2) << (double)dur_cpu.count() / dur_cpu_comb.count() << "x" << std::endl;
+    std::cout << "  CPU OMP:     " << (double)dur_cpu_omp.count() / dur_cpu_omp_comb.count() << "x" << std::endl;
+    std::cout << "  GPU kernel:  " << (double)dur_kernel.count() / dur_kernel_comb.count() << "x" << std::endl;
+    std::cout << "  GPU total:   " << ms_sep_total / ms_comb_total << "x" << std::endl;
     std::cout << std::endl;
 
     // Show the winner
-    if (separate_total_time < combined_total_time) {
-        std::cout << "Best GPU total time: " << std::setprecision(3) << separate_total_time << " ms (Separate layout)" << std::endl;
+    if (ms_sep_total < ms_comb_total) {
+        std::cout << "Best GPU total time: " << std::setprecision(3) << ms_sep_total << " ms (Separate layout)" << std::endl;
     } else {
-        std::cout << "Best GPU total time: " << std::setprecision(3) << combined_total_time << " ms (Combined layout)" << std::endl;
+        std::cout << "Best GPU total time: " << std::setprecision(3) << ms_comb_total << " ms (Combined layout)" << std::endl;
     }
     std::cout << "========================================" << std::endl;
 
@@ -376,15 +370,14 @@ int main(int argc, char** argv) {
 
         // Write data rows
         csv << std::fixed << std::setprecision(3);
-        csv << num_matrices << "," << threadsPerBlock << ",Separate," << cpu_duration.count() / 1000.0 << "," << cpu_omp_duration.count() / 1000.0
-            << "," << kernel_duration.count() / 1000.0 << "," << separate_xfer_time << "," << separate_total_time << "," << std::setprecision(1)
-            << cpu_gflops << "," << cpu_omp_gflops << "," << gpu_gflops << "," << std::setprecision(2)
-            << (cpu_duration.count() / 1000.0) / separate_total_time << "\n";
+        csv << num_matrices << "," << threadsPerBlock << ",Separate," << dur_cpu.count() / 1000.0 << "," << dur_cpu_omp.count() / 1000.0 << ","
+            << dur_kernel.count() / 1000.0 << "," << ms_sep_xfer << "," << ms_sep_total << "," << std::setprecision(1) << gflops_cpu << ","
+            << gflops_cpu_omp << "," << gflops_gpu << "," << std::setprecision(2) << (dur_cpu.count() / 1000.0) / ms_sep_total << "\n";
 
-        csv << num_matrices << "," << threadsPerBlock << ",Combined," << cpu_combined_duration.count() / 1000.0 << ","
-            << cpu_omp_combined_duration.count() / 1000.0 << "," << kernel_combined_duration.count() / 1000.0 << "," << combined_xfer_time << ","
-            << combined_total_time << "," << std::setprecision(1) << cpu_combined_gflops << "," << cpu_omp_combined_gflops << ","
-            << gpu_combined_gflops << "," << std::setprecision(2) << (cpu_combined_duration.count() / 1000.0) / combined_total_time << "\n";
+        csv << num_matrices << "," << threadsPerBlock << ",Combined," << dur_cpu_comb.count() / 1000.0 << "," << dur_cpu_omp_comb.count() / 1000.0
+            << "," << dur_kernel_comb.count() / 1000.0 << "," << ms_comb_xfer << "," << ms_comb_total << "," << std::setprecision(1)
+            << gflops_cpu_comb << "," << gflops_cpu_omp_comb << "," << gflops_gpu_comb << "," << std::setprecision(2)
+            << (dur_cpu_comb.count() / 1000.0) / ms_comb_total << "\n";
 
         csv.close();
         std::cout << "\nData written to: " << csv_filename << std::endl;
