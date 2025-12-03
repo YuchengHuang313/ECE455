@@ -161,9 +161,9 @@ void free_memory(MemoryPointers& mem, bool use_managed) {
 
 // ========== POWER MEASUREMENT ==========
 
-// Read Jetson power from sysfs
-double read_jetson_power() {
-    // VDD_IN rail (channel 1) measures total system input power
+// Read power from available sources (Jetson-specific, returns 0.0 on other platforms)
+double read_system_power() {
+    // Try Jetson INA3221 sensor (VDD_IN rail - channel 1 measures total system input power)
     const char* voltage_path = "/sys/devices/platform/bus@0/c240000.i2c/i2c-1/1-0040/hwmon/hwmon1/in1_input";
     const char* current_path = "/sys/devices/platform/bus@0/c240000.i2c/i2c-1/1-0040/hwmon/hwmon1/curr1_input";
 
@@ -181,6 +181,7 @@ double read_jetson_power() {
         return (voltage_mv * current_ma) / 1000000.0;
     }
 
+    // Power measurement not available on this platform
     return 0.0;
 }
 
@@ -193,7 +194,7 @@ class PowerSampler {
 
     void sample_loop() {
         while (running) {
-            double power = read_jetson_power();
+            double power = read_system_power();
             if (power > 0.0) {
                 samples.push_back(power);
             }
@@ -538,11 +539,11 @@ int main(int argc, char** argv) {
     }
 
     // Test if power measurement works
-    double test_power = read_jetson_power();
+    double test_power = read_system_power();
     if (test_power > 0.0) {
         std::cout << "Power measurement working: " << std::fixed << std::setprecision(2) << test_power << "W" << std::endl;
     } else {
-        std::cerr << "[WARNING] Power measurement not available" << std::endl;
+        std::cout << "[INFO] Power measurement not available on this platform (power values will be 0.0W)" << std::endl;
     }
     std::cout << std::endl;
 
