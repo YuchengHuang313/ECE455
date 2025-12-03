@@ -10,20 +10,55 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "small_matmul.cuh"
 
 #define MAT_SIZE 4
 
-// Helper function for center-aligned text
+// ========== STRUCTURES FOR ORGANIZING DATA ==========
+
+struct BenchmarkConfig {
+    int num_matrices;
+    int threads_per_block;
+    int num_joints;
+    bool use_unified;
+};
+
+struct MemoryPointers {
+    float *h_A, *h_B, *h_C, *h_D;
+    float* h_out_gpu;
+    float *d_A, *d_B, *d_C, *d_D;
+    float* d_out;
+};
+
+struct CombinedMemoryPointers {
+    float* h_matrices_combined;
+    float* h_out_gpu_combined;
+    float* d_matrices_combined;
+    float* d_out_combined;
+};
+
+struct TimingResults {
+    std::chrono::microseconds cpu;
+    std::chrono::microseconds cpu_omp;
+    std::chrono::microseconds h2d;
+    std::chrono::microseconds kernel;
+    std::chrono::microseconds d2h;
+};
+
+// ========== HELPER FUNCTIONS ==========
+
 std::string center(const std::string& str, int width) {
+    if (str.length() >= static_cast<size_t>(width)) {
+        return str;  // String is already wider than requested width
+    }
     int padding = width - str.length();
     int pad_left = padding / 2;
     int pad_right = padding - pad_left;
     return std::string(pad_left, ' ') + str + std::string(pad_right, ' ');
 }
 
-// Check CUDA errors
 #define CUDA_CHECK(call)                                                                                                   \
     do {                                                                                                                   \
         cudaError_t err = call;                                                                                            \
@@ -33,11 +68,328 @@ std::string center(const std::string& str, int width) {
         }                                                                                                                  \
     } while (0)
 
+bool has_unified_memory() {
+    int device;
+    CUDA_CHECK(cudaGetDevice(&device));
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, device));
+    return prop.integrated == 1;
+}
+
+// ========== MEMORY ALLOCATION ==========
+
+MemoryPointers allocate_separate_memory(size_t bytes, bool use_unified) {
+    MemoryPointers mem = {};
+
+    if (use_unified) {
+        CUDA_CHECK(cudaMallocManaged(&mem.h_A, bytes));
+        CUDA_CHECK(cudaMallocManaged(&mem.h_B, bytes));
+        CUDA_CHECK(cudaMallocManaged(&mem.h_C, bytes));
+        CUDA_CHECK(cudaMallocManaged(&mem.h_D, bytes));
+        CUDA_CHECK(cudaMallocManaged(&mem.h_out_gpu, bytes));
+    } else {
+        CUDA_CHECK(cudaHostAlloc(&mem.h_A, bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaHostAlloc(&mem.h_B, bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaHostAlloc(&mem.h_C, bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaHostAlloc(&mem.h_D, bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaHostAlloc(&mem.h_out_gpu, bytes, cudaHostAllocDefault));
+
+        CUDA_CHECK(cudaMalloc(&mem.d_A, bytes));
+        CUDA_CHECK(cudaMalloc(&mem.d_B, bytes));
+        CUDA_CHECK(cudaMalloc(&mem.d_C, bytes));
+        CUDA_CHECK(cudaMalloc(&mem.d_D, bytes));
+        CUDA_CHECK(cudaMalloc(&mem.d_out, bytes));
+    }
+
+    return mem;
+}
+
+CombinedMemoryPointers allocate_combined_memory(size_t input_bytes, size_t output_bytes, bool use_unified) {
+    CombinedMemoryPointers mem = {};
+
+    if (use_unified) {
+        CUDA_CHECK(cudaMallocManaged(&mem.h_matrices_combined, input_bytes));
+        CUDA_CHECK(cudaMallocManaged(&mem.h_out_gpu_combined, output_bytes));
+    } else {
+        CUDA_CHECK(cudaHostAlloc(&mem.h_matrices_combined, input_bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaHostAlloc(&mem.h_out_gpu_combined, output_bytes, cudaHostAllocDefault));
+        CUDA_CHECK(cudaMalloc(&mem.d_matrices_combined, input_bytes));
+        CUDA_CHECK(cudaMalloc(&mem.d_out_combined, output_bytes));
+    }
+
+    return mem;
+}
+
+void free_separate_memory(MemoryPointers& mem, bool use_unified) {
+    if (use_unified) {
+        CUDA_CHECK(cudaFree(mem.h_A));
+        CUDA_CHECK(cudaFree(mem.h_B));
+        CUDA_CHECK(cudaFree(mem.h_C));
+        CUDA_CHECK(cudaFree(mem.h_D));
+        CUDA_CHECK(cudaFree(mem.h_out_gpu));
+    } else {
+        CUDA_CHECK(cudaFreeHost(mem.h_A));
+        CUDA_CHECK(cudaFreeHost(mem.h_B));
+        CUDA_CHECK(cudaFreeHost(mem.h_C));
+        CUDA_CHECK(cudaFreeHost(mem.h_D));
+        CUDA_CHECK(cudaFreeHost(mem.h_out_gpu));
+        CUDA_CHECK(cudaFree(mem.d_A));
+        CUDA_CHECK(cudaFree(mem.d_B));
+        CUDA_CHECK(cudaFree(mem.d_C));
+        CUDA_CHECK(cudaFree(mem.d_D));
+        CUDA_CHECK(cudaFree(mem.d_out));
+    }
+}
+
+void free_combined_memory(CombinedMemoryPointers& mem, bool use_unified) {
+    if (use_unified) {
+        CUDA_CHECK(cudaFree(mem.h_matrices_combined));
+        CUDA_CHECK(cudaFree(mem.h_out_gpu_combined));
+    } else {
+        CUDA_CHECK(cudaFreeHost(mem.h_matrices_combined));
+        CUDA_CHECK(cudaFreeHost(mem.h_out_gpu_combined));
+        CUDA_CHECK(cudaFree(mem.d_matrices_combined));
+        CUDA_CHECK(cudaFree(mem.d_out_combined));
+    }
+}
+
+// ========== CPU BENCHMARKING ==========
+
+TimingResults run_cpu_benchmarks_separate(MemoryPointers& mem, int num_matrices, int total_elements) {
+    TimingResults timing = {};
+
+    // Single-threaded CPU
+    auto t_start = std::chrono::high_resolution_clock::now();
+    small_matmul_batched_cpu(mem.h_A, mem.h_B, mem.h_C, mem.h_D, mem.h_out_gpu, num_matrices);
+    auto t_end = std::chrono::high_resolution_clock::now();
+    timing.cpu = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    // OpenMP CPU
+    float* h_out_cpu_omp = new float[total_elements];
+    t_start = std::chrono::high_resolution_clock::now();
+    small_matmul_batched_cpu_omp(mem.h_A, mem.h_B, mem.h_C, mem.h_D, h_out_cpu_omp, num_matrices);
+    t_end = std::chrono::high_resolution_clock::now();
+    timing.cpu_omp = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+    delete[] h_out_cpu_omp;
+
+    return timing;
+}
+
+// ========== GPU BENCHMARKING (SEPARATE LAYOUT) ==========
+
+TimingResults run_gpu_benchmark_separate(MemoryPointers& mem, const BenchmarkConfig& config, size_t bytes) {
+    TimingResults timing = {};
+
+    // H2D transfer
+    auto t_start = std::chrono::high_resolution_clock::now();
+    if (!config.use_unified) {
+        CUDA_CHECK(cudaMemcpy(mem.d_A, mem.h_A, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(mem.d_B, mem.h_B, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(mem.d_C, mem.h_C, bytes, cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(mem.d_D, mem.h_D, bytes, cudaMemcpyHostToDevice));
+    }
+    auto t_end = std::chrono::high_resolution_clock::now();
+    timing.h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    // Report transfer
+    auto us_h2d = timing.h2d.count();
+    double bw_h2d = (bytes * 4 / (1024.0 * 1024.0 * 1024.0)) / (us_h2d / 1e6);
+    if (config.use_unified) {
+        std::cout << "Separate H->D: N/A (managed memory - no transfer needed)" << std::endl;
+    } else {
+        std::cout << "Separate H->D: " << std::fixed << std::setprecision(2) << us_h2d / 1000.0 << " ms (" << bw_h2d << " GB/s)" << std::endl;
+    }
+
+    // Kernel launch
+    int numBlocks = (config.num_matrices + config.threads_per_block - 1) / config.threads_per_block;
+    dim3 blocks(numBlocks, 1);
+    dim3 threads(config.threads_per_block, 1);
+
+    t_start = std::chrono::high_resolution_clock::now();
+    if (config.use_unified) {
+        small_matmul_batched<<<blocks, threads>>>(mem.h_A, mem.h_B, mem.h_C, mem.h_D, mem.h_out_gpu, config.num_matrices);
+    } else {
+        small_matmul_batched<<<blocks, threads>>>(mem.d_A, mem.d_B, mem.d_C, mem.d_D, mem.d_out, config.num_matrices);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    t_end = std::chrono::high_resolution_clock::now();
+    timing.kernel = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    // D2H transfer
+    t_start = std::chrono::high_resolution_clock::now();
+    if (!config.use_unified) {
+        CUDA_CHECK(cudaMemcpy(mem.h_out_gpu, mem.d_out, bytes, cudaMemcpyDeviceToHost));
+    }
+    t_end = std::chrono::high_resolution_clock::now();
+    timing.d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    auto us_d2h = timing.d2h.count();
+    double bw_d2h = (bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h / 1e6);
+    if (config.use_unified) {
+        std::cout << "Separate D->H: N/A (managed memory - no transfer needed)" << std::endl;
+    } else {
+        std::cout << "Separate D->H: " << std::fixed << std::setprecision(2) << us_d2h / 1000.0 << " ms (" << bw_d2h << " GB/s)" << std::endl;
+    }
+    std::cout << std::endl;
+
+    return timing;
+}
+
+// ========== GPU BENCHMARKING (COMBINED LAYOUT) ==========
+
+TimingResults run_gpu_benchmark_combined(CombinedMemoryPointers& mem, const BenchmarkConfig& config, size_t input_bytes, size_t output_bytes) {
+    TimingResults timing = {};
+
+    // H2D transfer
+    auto t_start = std::chrono::high_resolution_clock::now();
+    if (!config.use_unified) {
+        CUDA_CHECK(cudaMemcpy(mem.d_matrices_combined, mem.h_matrices_combined, input_bytes, cudaMemcpyHostToDevice));
+    }
+    auto t_end = std::chrono::high_resolution_clock::now();
+    timing.h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    auto us_h2d = timing.h2d.count();
+    double bw_h2d = (input_bytes / (1024.0 * 1024.0 * 1024.0)) / (us_h2d / 1e6);
+    if (config.use_unified) {
+        std::cout << "Combined H->D: N/A (managed memory - no transfer needed)" << std::endl;
+    } else {
+        std::cout << "Combined H->D: " << std::fixed << std::setprecision(2) << us_h2d / 1000.0 << " ms (" << bw_h2d << " GB/s)" << std::endl;
+    }
+
+    // Kernel launch
+    int numBlocks = (config.num_matrices + config.threads_per_block - 1) / config.threads_per_block;
+    dim3 blocks(numBlocks, 1);
+    dim3 threads(config.threads_per_block, 1);
+
+    t_start = std::chrono::high_resolution_clock::now();
+    if (config.use_unified) {
+        small_matmul_batched_combined<<<blocks, threads>>>(mem.h_matrices_combined, mem.h_out_gpu_combined, config.num_matrices, config.num_joints);
+    } else {
+        small_matmul_batched_combined<<<blocks, threads>>>(mem.d_matrices_combined, mem.d_out_combined, config.num_matrices, config.num_joints);
+    }
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    t_end = std::chrono::high_resolution_clock::now();
+    timing.kernel = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    // D2H transfer
+    t_start = std::chrono::high_resolution_clock::now();
+    if (!config.use_unified) {
+        CUDA_CHECK(cudaMemcpy(mem.h_out_gpu_combined, mem.d_out_combined, output_bytes, cudaMemcpyDeviceToHost));
+    }
+    t_end = std::chrono::high_resolution_clock::now();
+    timing.d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
+
+    auto us_d2h = timing.d2h.count();
+    double bw_d2h = (output_bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h / 1e6);
+    if (config.use_unified) {
+        std::cout << "Combined D->H: N/A (managed memory - no transfer needed)" << std::endl;
+    } else {
+        std::cout << "Combined D->H: " << std::fixed << std::setprecision(2) << us_d2h / 1000.0 << " ms (" << bw_d2h << " GB/s)" << std::endl;
+    }
+    std::cout << std::endl;
+
+    return timing;
+}
+
+// ========== RESULTS PRINTING ==========
+
+struct BenchmarkResult {
+    std::string name;
+    TimingResults timing;
+    bool correct;
+};
+
+void print_results_table(const std::vector<BenchmarkResult>& results, int num_matrices, size_t bytes, size_t combined_input_bytes) {
+    // Calculate GFLOPS
+    long long total_flops = (long long)num_matrices * 3 * 128;
+
+    std::cout << std::endl;
+    std::cout << "Data transfer sizes:" << std::endl;
+    std::cout << "  Separate layout input:  " << (bytes * 4) / (1024.0 * 1024.0) << " MB (4 arrays)" << std::endl;
+    std::cout << "  Separate layout output: " << bytes / (1024.0 * 1024.0) << " MB" << std::endl;
+    std::cout << "  Combined layout input:  " << combined_input_bytes / (1024.0 * 1024.0) << " MB" << std::endl;
+    std::cout << "  Combined layout output: " << bytes / (1024.0 * 1024.0) << " MB" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << center("Layout", 18) << " | " << center("CPU (ms)", 10) << " | " << center("OMP (ms)", 10) << " | " << center("GPU (ms)", 10)
+              << " | " << center("GPU Xfer (ms)", 13) << " | " << center("GPU Total (ms)", 14) << " | " << center("CPU GF", 8) << " | "
+              << center("OMP GF", 8) << " | " << center("GPU GF", 8) << " | " << center("Speedup", 10) << " | " << center("OK", 4) << std::endl;
+    std::cout << "-------------------|------------|------------|------------|---------------|----------------|----------|----------|----------|------"
+                 "------|------"
+              << std::endl;
+
+    // Print each result row
+    for (const auto& result : results) {
+        double gflops_cpu = (double)total_flops / (result.timing.cpu.count() * 1e3);
+        double gflops_cpu_omp = (double)total_flops / (result.timing.cpu_omp.count() * 1e3);
+        double gflops_gpu = (double)total_flops / (result.timing.kernel.count() * 1e3);
+        double ms_xfer = (result.timing.h2d.count() + result.timing.d2h.count()) / 1000.0;
+        double ms_total = result.timing.kernel.count() / 1000.0 + ms_xfer;
+
+        std::cout << std::setw(18) << std::right << result.name << " | " << std::setw(10) << std::fixed << std::setprecision(3)
+                  << result.timing.cpu.count() / 1000.0 << " | " << std::setw(10) << result.timing.cpu_omp.count() / 1000.0 << " | " << std::setw(10)
+                  << result.timing.kernel.count() / 1000.0 << " | " << std::setw(13) << ms_xfer << " | " << std::setw(14) << ms_total << " | "
+                  << std::setw(8) << std::setprecision(1) << gflops_cpu << " | " << std::setw(8) << gflops_cpu_omp << " | " << std::setw(8)
+                  << gflops_gpu << " | " << std::setw(9) << std::setprecision(2) << (result.timing.cpu.count() / 1000.0) / ms_total << "x | "
+                  << (result.correct ? "  ✓" : "  ✗") << std::endl;
+    }
+
+    std::cout << std::endl;
+    std::cout << "Legend:" << std::endl;
+    std::cout << "  Layout  = Memory layout and type (Managed/Pinned)" << std::endl;
+    std::cout << "  CPU/OMP = Single-threaded/OpenMP execution time" << std::endl;
+    std::cout << "  GPU     = GPU kernel execution time (compute only)" << std::endl;
+    std::cout << "  Xfer    = Data transfer time (CPU→GPU + GPU→CPU copy time)" << std::endl;
+    std::cout << "  Total   = GPU + Xfer (realistic total GPU time including transfers)" << std::endl;
+    std::cout << "  GF      = GFLOPS (billions of floating-point ops/sec)" << std::endl;
+    std::cout << "  Speedup = CPU time / Total GPU time (realistic speedup)" << std::endl;
+    std::cout << "  OK      = Verification passed (✓) or failed (✗)" << std::endl;
+    std::cout << std::endl;
+    std::cout << "========================================" << std::endl;
+}
+
+void write_csv_results(const std::vector<BenchmarkResult>& results, int num_matrices, int threads_per_block) {
+    const char* csv_filename = "compare_mem_layout_output.csv";
+    std::remove(csv_filename);
+
+    std::ofstream csv(csv_filename);
+    if (!csv.is_open()) {
+        std::cerr << "Warning: Could not open " << csv_filename << " for writing" << std::endl;
+        return;
+    }
+
+    long long total_flops = (long long)num_matrices * 3 * 128;
+
+    csv << "num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,gpu_xfer_ms,gpu_total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup\n";
+    csv << std::fixed << std::setprecision(3);
+
+    for (const auto& result : results) {
+        double gflops_cpu = (double)total_flops / (result.timing.cpu.count() * 1e3);
+        double gflops_cpu_omp = (double)total_flops / (result.timing.cpu_omp.count() * 1e3);
+        double gflops_gpu = (double)total_flops / (result.timing.kernel.count() * 1e3);
+        double ms_xfer = (result.timing.h2d.count() + result.timing.d2h.count()) / 1000.0;
+        double ms_total = result.timing.kernel.count() / 1000.0 + ms_xfer;
+
+        csv << num_matrices << "," << threads_per_block << "," << result.name << "," << result.timing.cpu.count() / 1000.0 << ","
+            << result.timing.cpu_omp.count() / 1000.0 << "," << result.timing.kernel.count() / 1000.0 << "," << ms_xfer << "," << ms_total << ","
+            << std::setprecision(1) << gflops_cpu << "," << gflops_cpu_omp << "," << gflops_gpu << "," << std::setprecision(2)
+            << (result.timing.cpu.count() / 1000.0) / ms_total << "\n";
+    }
+
+    csv.close();
+    std::cout << "\nData written to: " << csv_filename << std::endl;
+}
+
+// ========== MAIN ==========
+
 int main(int argc, char** argv) {
     // Show usage if help requested
     if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
         std::cout << "Usage: " << argv[0] << " [num_matrices] [threads_per_block]" << std::endl;
         std::cout << "\nCompares separate (A,B,C,D arrays) vs combined (interleaved) memory layouts" << std::endl;
+        std::cout << "Tests both managed and pinned memory types" << std::endl;
         std::cout << "\nArguments:" << std::endl;
         std::cout << "  num_matrices       Number of matrix sets to process (default: 1000000)" << std::endl;
         std::cout << "  threads_per_block  CUDA threads per block (default: 64)" << std::endl;
@@ -46,352 +398,123 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Default parameters
-    int num_matrices = 1000000;
-    int threadsPerBlock = 64;
-
-    if (argc > 1) {
-        num_matrices = std::atoi(argv[1]);
-    }
-    if (argc > 2) {
-        threadsPerBlock = std::atoi(argv[2]);
-    }
-
-    int num_threads = omp_get_max_threads();
-    const int num_joints = 4;
+    // Setup configuration
+    BenchmarkConfig config;
+    config.num_matrices = (argc > 1) ? std::atoi(argv[1]) : 1000000;
+    config.threads_per_block = (argc > 2) ? std::atoi(argv[2]) : 64;
+    config.num_joints = 4;
+    bool has_unified = has_unified_memory();
 
     std::cout << "========================================" << std::endl;
     std::cout << "  Memory Layout Comparison Test" << std::endl;
-    std::cout << "  Number of matrix sets: " << num_matrices << std::endl;
-    std::cout << "  Number of joints (chain length): " << num_joints << std::endl;
-    std::cout << "  Threads per block: " << threadsPerBlock << std::endl;
-    std::cout << "  OpenMP threads: " << num_threads << std::endl;
+    std::cout << "  Number of matrix sets: " << config.num_matrices << std::endl;
+    std::cout << "  Number of joints (chain length): " << config.num_joints << std::endl;
+    std::cout << "  Threads per block: " << config.threads_per_block << std::endl;
+    std::cout << "  OpenMP threads: " << omp_get_max_threads() << std::endl;
+    std::cout << "  System: " << (has_unified ? "Unified memory" : "Discrete GPU") << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << std::endl;
 
     // Calculate sizes
     const int elements_per_matrix = MAT_SIZE * MAT_SIZE;
-    const int total_elements = num_matrices * elements_per_matrix;
+    const int total_elements = config.num_matrices * elements_per_matrix;
     const size_t bytes = total_elements * sizeof(float);
-
-    // Allocate host memory - use pinned memory for GPU transfers
-    float *h_A, *h_B, *h_C, *h_D;
-    CUDA_CHECK(cudaHostAlloc(&h_A, bytes, cudaHostAllocDefault));
-    CUDA_CHECK(cudaHostAlloc(&h_B, bytes, cudaHostAllocDefault));
-    CUDA_CHECK(cudaHostAlloc(&h_C, bytes, cudaHostAllocDefault));
-    CUDA_CHECK(cudaHostAlloc(&h_D, bytes, cudaHostAllocDefault));
-    float* h_out_cpu = new float[total_elements];
-
-    // Use pinned memory for GPU output to get better transfer performance
-    float* h_out_gpu;
-    CUDA_CHECK(cudaHostAlloc(&h_out_gpu, total_elements * sizeof(float), cudaHostAllocDefault));  // Initialize with random data
-    initialize_random(h_A, total_elements);
-    initialize_random(h_B, total_elements);
-    initialize_random(h_C, total_elements);
-    initialize_random(h_D, total_elements);
-
-    // ========== SEPARATE LAYOUT (A,B,C,D) ==========
-    std::cout << "\n[SEPARATE LAYOUT - A,B,C,D arrays]" << std::endl;
-
-    // ========== CPU VERSION ==========
-    auto t_cpu_start = std::chrono::high_resolution_clock::now();
-
-    small_matmul_batched_cpu(h_A, h_B, h_C, h_D, h_out_cpu, num_matrices);
-
-    auto t_cpu_end = std::chrono::high_resolution_clock::now();
-    auto dur_cpu = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_end - t_cpu_start);
-
-    // ========== CPU OMP VERSION ==========
-    float* h_out_cpu_omp = new float[total_elements];
-    auto t_cpu_omp_start = std::chrono::high_resolution_clock::now();
-
-    small_matmul_batched_cpu_omp(h_A, h_B, h_C, h_D, h_out_cpu_omp, num_matrices);
-
-    auto t_cpu_omp_end = std::chrono::high_resolution_clock::now();
-    auto dur_cpu_omp = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_omp_end - t_cpu_omp_start);
-
-    // Free h_out_cpu_omp early since we'll use h_out_cpu for verification
-    delete[] h_out_cpu_omp;
-
-    // Save a subset of CPU results for verification, then free the full array
-    const int verify_samples = std::min(10000, total_elements);  // Keep only 10k elements for verification
-    float* h_verify_cpu = new float[verify_samples];
-    std::memcpy(h_verify_cpu, h_out_cpu, verify_samples * sizeof(float));
-    delete[] h_out_cpu;
-
-    // ========== GPU VERSION ==========
-
-    // Allocate device memory
-    float *d_A, *d_B, *d_C, *d_D, *d_out;
-    CUDA_CHECK(cudaMalloc(&d_A, bytes));
-    CUDA_CHECK(cudaMalloc(&d_B, bytes));
-    CUDA_CHECK(cudaMalloc(&d_C, bytes));
-    CUDA_CHECK(cudaMalloc(&d_D, bytes));
-    CUDA_CHECK(cudaMalloc(&d_out, bytes));
-
-    // Copy data to device
-    auto t_h2d_start = std::chrono::high_resolution_clock::now();
-
-    CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_C, h_C, bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_D, h_D, bytes, cudaMemcpyHostToDevice));
-
-    auto t_h2d_end = std::chrono::high_resolution_clock::now();
-
-    auto us_h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_end - t_h2d_start).count();
-    double bw_h2d = (bytes * 4 / (1024.0 * 1024.0 * 1024.0)) / (us_h2d / 1e6);
-    std::cout << "Separate H->D: " << std::fixed << std::setprecision(2) << us_h2d / 1000.0 << " ms (" << bw_h2d << " GB/s)" << std::endl;
-
-    // Free input host arrays - no longer needed after copying to device
-    CUDA_CHECK(cudaFreeHost(h_A));
-    CUDA_CHECK(cudaFreeHost(h_B));
-    CUDA_CHECK(cudaFreeHost(h_C));
-    CUDA_CHECK(cudaFreeHost(h_D));
-
-    // Launch kernel
-    int numBlocks = (num_matrices + threadsPerBlock - 1) / threadsPerBlock;
-
-    // Check if we exceed max grid dimension on X axis (2^31-1 for modern GPUs)
-    const long long maxGridDimX = 2147483647LL;  // 2^31 - 1
-    if ((long long)numBlocks > maxGridDimX) {
-        std::cerr << "Error: Number of blocks (" << numBlocks << ") exceeds maximum X grid dimension (" << maxGridDimX << ")" << std::endl;
-        std::cerr << "This would require more than ~137 billion matrices. Consider batching your computation." << std::endl;
-
-        // Free memory and exit
-        delete[] h_verify_cpu;
-        delete[] h_out_gpu;
-        cudaFree(d_A);
-        cudaFree(d_B);
-        cudaFree(d_C);
-        cudaFree(d_D);
-        cudaFree(d_out);
-        return 1;
-    }
-
-    auto t_kernel_start = std::chrono::high_resolution_clock::now();
-
-    // Launch kernel directly
-    dim3 blocks(numBlocks, 1);  // Use X dimension instead of Y
-    dim3 threads(threadsPerBlock, 1);
-    small_matmul_batched<<<blocks, threads>>>(d_A, d_B, d_C, d_D, d_out, num_matrices);
-
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_kernel_end = std::chrono::high_resolution_clock::now();
-
-    // Copy result back
-    CUDA_CHECK(cudaMemcpy(h_out_gpu, d_out, bytes, cudaMemcpyDeviceToHost));
-
-    auto t_d2h_end = std::chrono::high_resolution_clock::now();
-
-    auto us_d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_kernel_end).count();
-    double bw_d2h = (bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h / 1e6);
-    std::cout << "Separate D->H: " << std::fixed << std::setprecision(2) << us_d2h / 1000.0 << " ms (" << bw_d2h << " GB/s)" << std::endl;
-    std::cout << std::endl;
-
-    // Timing breakdown
-    auto dur_h2d = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_end - t_h2d_start);
-    auto dur_kernel = std::chrono::duration_cast<std::chrono::microseconds>(t_kernel_end - t_kernel_start);
-    auto dur_d2h = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_kernel_end);
-    auto dur_gpu_total = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_end - t_h2d_start);
-
-    // ========== VERIFICATION ==========
-    bool correct_gpu = compare_results(h_verify_cpu, h_out_gpu, verify_samples, 1e-4f);
-
-    // Free verification data - no longer needed
-    delete[] h_verify_cpu;
-    CUDA_CHECK(cudaFreeHost(h_out_gpu));
-
-    // Free GPU memory for separate layout
-    CUDA_CHECK(cudaFree(d_A));
-    CUDA_CHECK(cudaFree(d_B));
-    CUDA_CHECK(cudaFree(d_C));
-    CUDA_CHECK(cudaFree(d_D));
-    CUDA_CHECK(cudaFree(d_out));
-
-    // Ensure GPU is completely idle before next test
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    // Wait to let system settle (thermal, memory controller, PCIe state)
-    std::cout << "Waiting 2 seconds before combined layout test..." << std::endl;
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-
-    // ========== COMBINED LAYOUT ==========
-
-    const int total_combined_input = num_matrices * num_joints * elements_per_matrix;
+    const int total_combined_input = config.num_matrices * config.num_joints * elements_per_matrix;
     const size_t combined_input_bytes = total_combined_input * sizeof(float);
 
-    // Allocate combined format and CPU reference output
-    float* h_matrices_combined;
-    CUDA_CHECK(cudaHostAlloc(&h_matrices_combined, combined_input_bytes, cudaHostAllocDefault));
-    float* h_out_cpu_combined = new float[total_elements];
-    float* h_out_cpu_omp_combined = new float[total_elements];
+    std::vector<BenchmarkResult> results;
 
-    // Use pinned memory for GPU output to get better transfer performance
-    float* h_out_gpu_combined;
-    CUDA_CHECK(cudaHostAlloc(&h_out_gpu_combined, total_elements * sizeof(float),
-                             cudaHostAllocDefault));  // Initialize with same random seed for reproducibility
-    initialize_random(h_matrices_combined, total_combined_input);
+    // Helper to run a benchmark configuration
+    auto run_benchmark = [&](const std::string& layout_name, bool use_managed, bool is_combined) {
+        config.use_unified = use_managed;
+        std::string full_name = layout_name + " (" + (use_managed ? "Managed" : "Pinned") + ")";
 
-    // Run CPU single-threaded version for combined format
-    auto t_cpu_comb_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined_cpu(h_matrices_combined, h_out_cpu_combined, num_matrices, num_joints);
-    auto t_cpu_comb_end = std::chrono::high_resolution_clock::now();
-    auto dur_cpu_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_comb_end - t_cpu_comb_start);
+        std::cout << "\n[" << full_name << "]" << std::endl;
 
-    // Run CPU OpenMP version for combined format
-    auto t_cpu_omp_comb_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined_cpu_omp(h_matrices_combined, h_out_cpu_omp_combined, num_matrices, num_joints);
-    auto t_cpu_omp_comb_end = std::chrono::high_resolution_clock::now();
-    auto dur_cpu_omp_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_cpu_omp_comb_end - t_cpu_omp_comb_start);
+        TimingResults timing;
+        bool correct;
 
-    // Allocate device memory for combined version
-    float *d_matrices_combined, *d_out_combined;
-    CUDA_CHECK(cudaMalloc(&d_matrices_combined, combined_input_bytes));
-    CUDA_CHECK(cudaMalloc(&d_out_combined, bytes));
+        if (is_combined) {
+            // Combined layout
+            CombinedMemoryPointers comb_mem = allocate_combined_memory(combined_input_bytes, bytes, use_managed);
+            initialize_random(comb_mem.h_matrices_combined, total_combined_input);
 
-    // Copy data to device
-    auto t_h2d_comb_start = std::chrono::high_resolution_clock::now();
-    CUDA_CHECK(cudaMemcpy(d_matrices_combined, h_matrices_combined, combined_input_bytes, cudaMemcpyHostToDevice));
-    auto t_h2d_comb_end = std::chrono::high_resolution_clock::now();
+            // CPU benchmarks
+            float* h_out_cpu_combined = new float[total_elements];
+            auto t_start = std::chrono::high_resolution_clock::now();
+            small_matmul_batched_combined_cpu(comb_mem.h_matrices_combined, h_out_cpu_combined, config.num_matrices, config.num_joints);
+            auto t_end = std::chrono::high_resolution_clock::now();
+            timing.cpu = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
 
-    auto us_h2d_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_comb_end - t_h2d_comb_start).count();
-    double bw_h2d_comb = (combined_input_bytes / (1024.0 * 1024.0 * 1024.0)) / (us_h2d_comb / 1e6);
-    std::cout << "Combined H->D: " << std::fixed << std::setprecision(2) << us_h2d_comb / 1000.0 << " ms (" << bw_h2d_comb << " GB/s)" << std::endl;
+            float* h_out_cpu_omp_combined = new float[total_elements];
+            t_start = std::chrono::high_resolution_clock::now();
+            small_matmul_batched_combined_cpu_omp(comb_mem.h_matrices_combined, h_out_cpu_omp_combined, config.num_matrices, config.num_joints);
+            t_end = std::chrono::high_resolution_clock::now();
+            timing.cpu_omp = std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_start);
 
-    // Launch combined kernel
-    auto t_kernel_comb_start = std::chrono::high_resolution_clock::now();
-    small_matmul_batched_combined<<<blocks, threads>>>(d_matrices_combined, d_out_combined, num_matrices, num_joints);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    auto t_kernel_comb_end = std::chrono::high_resolution_clock::now();
+            // GPU benchmark
+            TimingResults gpu_timing = run_gpu_benchmark_combined(comb_mem, config, combined_input_bytes, bytes);
+            timing.h2d = gpu_timing.h2d;
+            timing.kernel = gpu_timing.kernel;
+            timing.d2h = gpu_timing.d2h;
 
-    // Copy result back
-    CUDA_CHECK(cudaMemcpy(h_out_gpu_combined, d_out_combined, bytes, cudaMemcpyDeviceToHost));
-    auto t_d2h_comb_end = std::chrono::high_resolution_clock::now();
+            correct = compare_results(h_out_cpu_combined, comb_mem.h_out_gpu_combined, total_elements, 1e-3f) &&
+                      compare_results(h_out_cpu_combined, h_out_cpu_omp_combined, total_elements, 1e-5f);
 
-    auto us_d2h_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_kernel_comb_end).count();
-    double bw_d2h_comb = (bytes / (1024.0 * 1024.0 * 1024.0)) / (us_d2h_comb / 1e6);
-    std::cout << "Combined D->H: " << std::fixed << std::setprecision(2) << us_d2h_comb / 1000.0 << " ms (" << bw_d2h_comb << " GB/s)" << std::endl;
-    std::cout << std::endl;
+            delete[] h_out_cpu_combined;
+            delete[] h_out_cpu_omp_combined;
+            free_combined_memory(comb_mem, use_managed);
+        } else {
+            // Separate layout
+            MemoryPointers sep_mem = allocate_separate_memory(bytes, use_managed);
+            initialize_random(sep_mem.h_A, total_elements);
+            initialize_random(sep_mem.h_B, total_elements);
+            initialize_random(sep_mem.h_C, total_elements);
+            initialize_random(sep_mem.h_D, total_elements);
 
-    // Timing
-    auto dur_h2d_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_h2d_comb_end - t_h2d_comb_start);
-    auto dur_kernel_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_kernel_comb_end - t_kernel_comb_start);
-    auto dur_gpu_total_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_h2d_comb_start);
+            timing = run_cpu_benchmarks_separate(sep_mem, config.num_matrices, total_elements);
 
-    // Verify combined kernel correctness
-    bool correct_combined = compare_results(h_out_cpu_combined, h_out_gpu_combined, total_elements, 1e-3f);
-    bool correct_omp_combined = compare_results(h_out_cpu_combined, h_out_cpu_omp_combined, total_elements, 1e-5f);
+            // Save CPU result for verification
+            const int verify_samples = std::min(10000, total_elements);
+            float* h_verify_cpu = new float[verify_samples];
+            std::memcpy(h_verify_cpu, sep_mem.h_out_gpu, verify_samples * sizeof(float));
 
-    // Calculate GFLOPS
-    // Each matrix multiply: 4×4×4 = 64 multiply-adds = 128 FLOPs
-    // We do 3 multiplications per set: A×B, C×D, (A×B)×(C×D)
-    long long total_flops = (long long)num_matrices * 3 * 128;
-    double gflops_cpu = (double)total_flops / (dur_cpu.count() * 1e3);
-    double gflops_cpu_omp = (double)total_flops / (dur_cpu_omp.count() * 1e3);
-    double gflops_gpu = (double)total_flops / (dur_kernel.count() * 1e3);
-    double gflops_cpu_comb = (double)total_flops / (dur_cpu_comb.count() * 1e3);
-    double gflops_cpu_omp_comb = (double)total_flops / (dur_cpu_omp_comb.count() * 1e3);
-    double gflops_gpu_comb = (double)total_flops / (dur_kernel_comb.count() * 1e3);
+            TimingResults gpu_timing = run_gpu_benchmark_separate(sep_mem, config, bytes);
+            timing.h2d = gpu_timing.h2d;
+            timing.kernel = gpu_timing.kernel;
+            timing.d2h = gpu_timing.d2h;
 
-    // ========== PRINT RESULTS TABLE ==========
-    std::cout << std::endl;
-    std::cout << "Data transfer sizes:" << std::endl;
-    std::cout << "  Separate layout input:  " << (bytes * 4) / (1024.0 * 1024.0) << " MB (4 arrays)" << std::endl;
-    std::cout << "  Separate layout output: " << bytes / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Combined layout input:  " << combined_input_bytes / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << "  Combined layout output: " << bytes / (1024.0 * 1024.0) << " MB" << std::endl;
-    std::cout << std::endl;
-    std::cout << center("Layout", 10) << " | " << center("CPU (ms)", 10) << " | " << center("OMP (ms)", 10) << " | " << center("GPU (ms)", 10)
-              << " | " << center("Xfer (ms)", 10) << " | " << center("Total (ms)", 11) << " | " << center("CPU GF", 8) << " | " << center("OMP GF", 8)
-              << " | " << center("GPU GF", 8) << " | " << center("Speedup", 10) << " | " << center("OK", 4) << std::endl;
-    std::cout << "-----------|------------|------------|------------|------------|-------------|----------|----------|----------|------------|------"
-              << std::endl;
+            correct = compare_results(h_verify_cpu, sep_mem.h_out_gpu, verify_samples, 1e-4f);
+            delete[] h_verify_cpu;
 
-    // Separate layout row
-    double ms_sep_xfer = (dur_h2d.count() + dur_d2h.count()) / 1000.0;
-    double ms_sep_total = dur_kernel.count() / 1000.0 + ms_sep_xfer;
-    std::cout << std::setw(10) << std::right << "Separate" << " | " << std::setw(10) << std::fixed << std::setprecision(3) << dur_cpu.count() / 1000.0
-              << " | " << std::setw(10) << dur_cpu_omp.count() / 1000.0 << " | " << std::setw(10) << dur_kernel.count() / 1000.0 << " | "
-              << std::setw(10) << ms_sep_xfer << " | " << std::setw(11) << ms_sep_total << " | " << std::setw(8) << std::setprecision(1) << gflops_cpu
-              << " | " << std::setw(8) << gflops_cpu_omp << " | " << std::setw(8) << gflops_gpu << " | " << std::setw(9) << std::setprecision(2)
-              << (dur_cpu.count() / 1000.0) / ms_sep_total << "x | " << (correct_gpu ? "  ✓" : "  ✗") << std::endl;
+            free_separate_memory(sep_mem, use_managed);
+        }
 
-    // Combined layout row
-    auto dur_d2h_comb = std::chrono::duration_cast<std::chrono::microseconds>(t_d2h_comb_end - t_kernel_comb_end);
-    double ms_comb_xfer = (dur_h2d_comb.count() + dur_d2h_comb.count()) / 1000.0;
-    double ms_comb_total = dur_kernel_comb.count() / 1000.0 + ms_comb_xfer;
-    std::cout << std::setw(10) << std::right << "Combined" << " | " << std::setw(10) << std::fixed << std::setprecision(3)
-              << dur_cpu_comb.count() / 1000.0 << " | " << std::setw(10) << dur_cpu_omp_comb.count() / 1000.0 << " | " << std::setw(10)
-              << dur_kernel_comb.count() / 1000.0 << " | " << std::setw(10) << ms_comb_xfer << " | " << std::setw(11) << ms_comb_total << " | "
-              << std::setw(8) << std::setprecision(1) << gflops_cpu_comb << " | " << std::setw(8) << gflops_cpu_omp_comb << " | " << std::setw(8)
-              << gflops_gpu_comb << " | " << std::setw(9) << std::setprecision(2) << (dur_cpu_comb.count() / 1000.0) / ms_comb_total << "x | "
-              << (correct_combined && correct_omp_combined ? "  ✓" : "  ✗") << std::endl;
+        CUDA_CHECK(cudaDeviceSynchronize());
+        results.push_back({full_name, timing, correct});
 
-    std::cout << std::endl;
-    std::cout << "Legend:" << std::endl;
-    std::cout << "  Layout  = Memory layout (Separate: A,B,C,D arrays; Combined: interleaved)" << std::endl;
-    std::cout << "  CPU/OMP = Single-threaded/OpenMP execution time" << std::endl;
-    std::cout << "  GPU     = GPU kernel execution time (compute only)" << std::endl;
-    std::cout << "  Xfer    = Data transfer time (CPU→GPU + GPU→CPU copy time)" << std::endl;
-    std::cout << "  Total   = GPU + Xfer (realistic total GPU time including transfers)" << std::endl;
-    std::cout << "  GF      = GFLOPS (billions of floating-point ops/sec)" << std::endl;
-    std::cout << "  Speedup = CPU time / Total GPU time (realistic speedup)" << std::endl;
-    std::cout << "  OK      = Verification passed (✓) or failed (✗)" << std::endl;
+        // Wait between tests on discrete GPU
+        if (!use_managed && results.size() < 4) {
+            std::cout << "Waiting 1 second before next test..." << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    };
 
-    std::cout << std::endl;
-    std::cout << "Performance improvement (Combined vs Separate):" << std::endl;
-    std::cout << "  CPU single:  " << std::setprecision(2) << (double)dur_cpu.count() / dur_cpu_comb.count() << "x" << std::endl;
-    std::cout << "  CPU OMP:     " << (double)dur_cpu_omp.count() / dur_cpu_omp_comb.count() << "x" << std::endl;
-    std::cout << "  GPU kernel:  " << (double)dur_kernel.count() / dur_kernel_comb.count() << "x" << std::endl;
-    std::cout << "  GPU total:   " << ms_sep_total / ms_comb_total << "x" << std::endl;
-    std::cout << std::endl;
-
-    // Show the winner
-    if (ms_sep_total < ms_comb_total) {
-        std::cout << "Best GPU total time: " << std::setprecision(3) << ms_sep_total << " ms (Separate layout)" << std::endl;
+    // Run all benchmarks
+    if (has_unified) {
+        run_benchmark("Separate", true, false);   // Separate (Managed)
+        run_benchmark("Separate", false, false);  // Separate (Pinned)
+        run_benchmark("Combined", true, true);    // Combined (Managed)
+        run_benchmark("Combined", false, true);   // Combined (Pinned)
     } else {
-        std::cout << "Best GPU total time: " << std::setprecision(3) << ms_comb_total << " ms (Combined layout)" << std::endl;
-    }
-    std::cout << "========================================" << std::endl;
-
-    // ========== WRITE TO CSV FILE ==========
-    const char* csv_filename = "compare_mem_layout_output.csv";
-
-    // Delete old file and create fresh (overwrite mode)
-    std::remove(csv_filename);
-
-    std::ofstream csv(csv_filename);
-    if (csv.is_open()) {
-        // Always write header for fresh file
-        csv << "num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,xfer_ms,total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup\n";
-
-        // Write data rows
-        csv << std::fixed << std::setprecision(3);
-        csv << num_matrices << "," << threadsPerBlock << ",Separate," << dur_cpu.count() / 1000.0 << "," << dur_cpu_omp.count() / 1000.0 << ","
-            << dur_kernel.count() / 1000.0 << "," << ms_sep_xfer << "," << ms_sep_total << "," << std::setprecision(1) << gflops_cpu << ","
-            << gflops_cpu_omp << "," << gflops_gpu << "," << std::setprecision(2) << (dur_cpu.count() / 1000.0) / ms_sep_total << "\n";
-
-        csv << num_matrices << "," << threadsPerBlock << ",Combined," << dur_cpu_comb.count() / 1000.0 << "," << dur_cpu_omp_comb.count() / 1000.0
-            << "," << dur_kernel_comb.count() / 1000.0 << "," << ms_comb_xfer << "," << ms_comb_total << "," << std::setprecision(1)
-            << gflops_cpu_comb << "," << gflops_cpu_omp_comb << "," << gflops_gpu_comb << "," << std::setprecision(2)
-            << (dur_cpu_comb.count() / 1000.0) / ms_comb_total << "\n";
-
-        csv.close();
-        std::cout << "\nData written to: " << csv_filename << std::endl;
-    } else {
-        std::cerr << "Warning: Could not open " << csv_filename << " for writing" << std::endl;
+        // On discrete GPU, only run pinned versions
+        run_benchmark("Separate", false, false);  // Separate (Pinned)
+        run_benchmark("Combined", false, true);   // Combined (Pinned)
     }
 
-    // Cleanup combined
-    CUDA_CHECK(cudaFreeHost(h_matrices_combined));
-    delete[] h_out_cpu_combined;
-    delete[] h_out_cpu_omp_combined;
-    CUDA_CHECK(cudaFreeHost(h_out_gpu_combined));
-    CUDA_CHECK(cudaFree(d_matrices_combined));
-    CUDA_CHECK(cudaFree(d_out_combined));
+    // Print consolidated results
+    print_results_table(results, config.num_matrices, bytes, combined_input_bytes);
+    write_csv_results(results, config.num_matrices, config.threads_per_block);
 
     return 0;
 }

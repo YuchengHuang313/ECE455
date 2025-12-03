@@ -1,3 +1,5 @@
-num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,xfer_ms,total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup
-100000,64,Separate,2.819,9.925,2.576,5.192,7.768,13.6,3.9,14.9,0.36
-100000,64,Combined,3.85,7.01,0.28,3.53,3.81,10.0,5.5,135.7,1.01
+num_matrices,threads_per_block,layout,cpu_ms,omp_ms,gpu_ms,gpu_xfer_ms,gpu_total_ms,cpu_gflops,omp_gflops,gpu_gflops,speedup
+2000000,64,Separate (Managed),98.353,40.025,57.823,0.000,57.823,7.8,19.2,13.3,1.70
+2000000,64,Separate (Pinned),97.48,39.18,20.95,55.69,76.64,7.9,19.6,36.7,1.27
+2000000,64,Combined (Managed),147.58,49.33,63.48,0.00,63.48,5.2,15.6,12.1,2.32
+2000000,64,Combined (Pinned),146.86,47.88,26.60,54.95,81.55,5.2,16.0,28.9,1.80
