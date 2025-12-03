@@ -516,7 +516,7 @@ void test_num_joints(const BenchmarkConfig& config, bool has_unified) {
         // Cleanup managed memory
         free_memory(managed_mem, true);
     }
-
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     // Print and save results
     print_result_row(config, results, has_unified);
     append_csv_result(config, results);
