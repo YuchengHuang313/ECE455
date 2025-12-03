@@ -73,18 +73,21 @@ __global__ void small_matmul_batched_combined(const float* matrix, float* out, i
     // we will multiply them all together in sequence: (((A×B)×C)×D)...
     // each thread calculates matrix mult in sequence
     float result[MAT_SIZE * MAT_SIZE];
-    // Initialize result to identity matrix
+    float temp[MAT_SIZE * MAT_SIZE];
 
+    // Initialize result to identity matrix
 #pragma unroll
     for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
         result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
     }
 
+// DON'T unroll this loop - causes compiler issues with large num_joints
+// Force no unrolling to ensure consistent behavior across all num_joints values
 #pragma unroll
     for (int joint = 0; joint < num_joints; joint++) {
-        float temp[MAT_SIZE * MAT_SIZE];
         mul4x4_one(result, &matrix[(row * num_joints + joint) * MAT_SIZE * MAT_SIZE], temp);
-        // Copy temp back to result for next iteration
+        // Copy temp back to result for next iteration - unroll this inner loop
+#pragma unroll
         for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
             result[i] = temp[i];
         }

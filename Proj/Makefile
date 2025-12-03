@@ -60,7 +60,7 @@ NVCC_FLAGS += -gencode arch=compute_$(SM),code=sm_$(SM)
 # Optional: show register/SMEM usage
 # NVCC_FLAGS += -Xptxas=-v
 
-LDFLAGS = -lgomp
+LDFLAGS = -lgomp -lnvidia-ml
 
 # Target & sources
 TARGET_MEM_LAYOUT = compare_mem_layout
