@@ -73,18 +73,21 @@ __global__ void small_matmul_batched_combined(const float* matrix, float* out, i
     // we will multiply them all together in sequence: (((A×B)×C)×D)...
     // each thread calculates matrix mult in sequence
     float result[MAT_SIZE * MAT_SIZE];
-    // Initialize result to identity matrix
+    float temp[MAT_SIZE * MAT_SIZE];
 
+    // Initialize result to identity matrix
 #pragma unroll
     for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
         result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
     }
 
+// DON'T unroll this loop - causes compiler issues with large num_joints
+// Force no unrolling to ensure consistent behavior across all num_joints values
 #pragma unroll
     for (int joint = 0; joint < num_joints; joint++) {
-        float temp[MAT_SIZE * MAT_SIZE];
         mul4x4_one(result, &matrix[(row * num_joints + joint) * MAT_SIZE * MAT_SIZE], temp);
-        // Copy temp back to result for next iteration
+        // Copy temp back to result for next iteration - unroll this inner loop
+#pragma unroll
         for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
             result[i] = temp[i];
         }
@@ -141,17 +144,28 @@ void mul4x4_cpu(const float* __restrict__ A, const float* __restrict__ B, float*
 // CPU version of batched matrix multiplication
 void small_matmul_batched_cpu(const float* A, const float* B, const float* C, const float* D, float* out, int num_rows) {
     for (int row = 0; row < num_rows; row++) {
-        float result_AB[MAT_SIZE * MAT_SIZE];
-        float result_CD[MAT_SIZE * MAT_SIZE];
+        float result[MAT_SIZE * MAT_SIZE];
+        float temp[MAT_SIZE * MAT_SIZE];
 
-        // Compute A×B
-        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
+        // Initialize result to identity matrix
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
+            result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
+        }
 
-        // Compute C×D
-        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
+        // Compute I×A
+        mul4x4_cpu(result, &A[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
 
-        // Compute (A×B)×(C×D)
-        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+        // Compute (I×A)×B
+        mul4x4_cpu(result, &B[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
+
+        // Compute ((I×A)×B)×C
+        mul4x4_cpu(result, &C[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
+
+        // Compute (((I×A)×B)×C)×D
+        mul4x4_cpu(result, &D[row * MAT_SIZE * MAT_SIZE], &out[row * MAT_SIZE * MAT_SIZE]);
     }
 }
 
@@ -164,17 +178,28 @@ void small_matmul_batched_cpu_omp(const float* __restrict__ A, const float* __re
 #pragma omp parallel for schedule(static, 4096)
     for (int row = 0; row < num_rows; row++) {
         // Stack-allocated temporary arrays for intermediate results
-        float result_AB[MAT_SIZE * MAT_SIZE];
-        float result_CD[MAT_SIZE * MAT_SIZE];
+        float result[MAT_SIZE * MAT_SIZE];
+        float temp[MAT_SIZE * MAT_SIZE];
 
-        // Compute A×B
-        mul4x4_cpu(&A[row * MAT_SIZE * MAT_SIZE], &B[row * MAT_SIZE * MAT_SIZE], result_AB);
+        // Initialize result to identity matrix
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) {
+            result[i] = (i % (MAT_SIZE + 1) == 0) ? 1.0f : 0.0f;
+        }
 
-        // Compute C×D
-        mul4x4_cpu(&C[row * MAT_SIZE * MAT_SIZE], &D[row * MAT_SIZE * MAT_SIZE], result_CD);
+        // Compute I×A
+        mul4x4_cpu(result, &A[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
 
-        // Compute (A×B)×(C×D)
-        mul4x4_cpu(result_AB, result_CD, &out[row * MAT_SIZE * MAT_SIZE]);
+        // Compute (I×A)×B
+        mul4x4_cpu(result, &B[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
+
+        // Compute ((I×A)×B)×C
+        mul4x4_cpu(result, &C[row * MAT_SIZE * MAT_SIZE], temp);
+        for (int i = 0; i < MAT_SIZE * MAT_SIZE; i++) result[i] = temp[i];
+
+        // Compute (((I×A)×B)×C)×D
+        mul4x4_cpu(result, &D[row * MAT_SIZE * MAT_SIZE], &out[row * MAT_SIZE * MAT_SIZE]);
     }
 }
 
@@ -238,6 +263,8 @@ void small_matmul_batched_combined_cpu_omp(const float* __restrict__ matrix, flo
         }
     }
 }
+
+// ========== ROBOTIC SPECIFIC ==========
 
 // ========== HELPER FUNCTIONS ==========
 

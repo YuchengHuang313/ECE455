@@ -60,20 +60,21 @@ NVCC_FLAGS += -gencode arch=compute_$(SM),code=sm_$(SM)
 # Optional: show register/SMEM usage
 # NVCC_FLAGS += -Xptxas=-v
 
-LDFLAGS = -lgomp
+LDFLAGS = -lgomp -lnvidia-ml
 
 # Target & sources
 TARGET_MEM_LAYOUT = compare_mem_layout
 TARGET_VAR_JOINTS = compare_variable_joints
 TARGET_CORRECTNESS = test_combined_correctness
-CU_SOURCES = small_matmul.cu compare_mem_layout.cu compare_variable_joints.cu test_combined_correctness.cu
+TARGET_MEM_ACCESS = compare_mem_access
+CU_SOURCES = small_matmul.cu compare_mem_layout.cu compare_variable_joints.cu test_combined_correctness.cu compare_mem_access.cu
 HEADERS = small_matmul.cuh
 OBJECTS_MEM_LAYOUT = small_matmul.o compare_mem_layout.o
 OBJECTS_VAR_JOINTS = small_matmul.o compare_variable_joints.o
 OBJECTS_CORRECTNESS = small_matmul.o test_combined_correctness.o
 
 # Default
-all: $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS)
+all: $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS) $(TARGET_MEM_ACCESS)
 
 $(TARGET_MEM_LAYOUT): $(OBJECTS_MEM_LAYOUT)
 	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS)
@@ -94,6 +95,12 @@ compare_variable_joints.o: compare_variable_joints.cu $(HEADERS)
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
 test_combined_correctness.o: test_combined_correctness.cu $(HEADERS)
+	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
+
+$(TARGET_MEM_ACCESS): compare_mem_access.o
+	$(NVCC) $(NVCC_FLAGS) -o $@ $^ $(LDFLAGS)
+
+compare_mem_access.o: compare_mem_access.cu
 	$(NVCC) $(NVCC_FLAGS) -c $< -o $@
 
 run: $(TARGET_VAR_JOINTS)
@@ -120,8 +127,14 @@ run-joints-large: $(TARGET_VAR_JOINTS)
 run-correctness: $(TARGET_CORRECTNESS)
 	./$(TARGET_CORRECTNESS)
 
+run-mem-access: $(TARGET_MEM_ACCESS)
+	./$(TARGET_MEM_ACCESS)
+
+run-mem-access-large: $(TARGET_MEM_ACCESS)
+	./$(TARGET_MEM_ACCESS) 512
+
 clean:
-	rm -f *.o $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS)
+	rm -f *.o $(TARGET_MEM_LAYOUT) $(TARGET_VAR_JOINTS) $(TARGET_CORRECTNESS) $(TARGET_MEM_ACCESS)
 
 rebuild: clean all
 

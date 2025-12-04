@@ -30,6 +30,19 @@ void print_matrix(const float* mat, const char* name) {
 }
 
 int main(int argc, char** argv) {
+    // Show usage if help requested
+    if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
+        std::cout << "Usage: " << argv[0] << " [num_rows] [num_joints] [threads_per_block]" << std::endl;
+        std::cout << "\nTests correctness of batched combined matrix chain multiplication" << std::endl;
+        std::cout << "\nArguments:" << std::endl;
+        std::cout << "  num_rows           Number of independent chains (default: 10)" << std::endl;
+        std::cout << "  num_joints         Chain length (default: 4)" << std::endl;
+        std::cout << "  threads_per_block  CUDA threads per block (default: 64)" << std::endl;
+        std::cout << "\nExample:" << std::endl;
+        std::cout << "  " << argv[0] << " 10000 8 128" << std::endl;
+        return 0;
+    }
+
     // Test parameters
     int num_rows = 10;
     int num_joints = 4;
@@ -50,6 +63,14 @@ int main(int argc, char** argv) {
     std::cout << "Number of joints per row: " << num_joints << std::endl;
     std::cout << "Threads per block: " << threadsPerBlock << std::endl;
     std::cout << std::endl;
+
+    // Warn about very long chains
+    if (num_joints > 32) {
+        std::cout << "WARNING: Chain length " << num_joints << " is very long." << std::endl;
+        std::cout << "         Floating-point error accumulation may cause verification to fail." << std::endl;
+        std::cout << "         Consider using shorter chains (≤32) for correctness testing." << std::endl;
+        std::cout << std::endl;
+    }
 
     // Calculate sizes
     const int mat_size = MAT_SIZE * MAT_SIZE;
