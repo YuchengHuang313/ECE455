@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <dlfcn.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -161,7 +162,90 @@ void free_memory(MemoryPointers& mem, bool use_managed) {
 
 // ========== POWER MEASUREMENT ==========
 
-// Read power from available sources (Jetson-specific, returns 0.0 on other platforms)
+// Read CPU power from Intel RAPL interface
+double read_cpu_power() {
+    double total_power = 0.0;
+    
+    // Try to read from Intel RAPL (Running Average Power Limit)
+    // RAPL provides energy counters in microjoules
+    const char* rapl_base = "/sys/class/powercap/intel-rapl";
+    
+    // Read package energy (includes CPU cores and integrated graphics if present)
+    for (int pkg = 0; pkg < 2; ++pkg) {
+        std::string energy_path = std::string(rapl_base) + "/intel-rapl:" + std::to_string(pkg) + "/energy_uj";
+        std::ifstream energy_file(energy_path);
+        if (energy_file.is_open()) {
+            unsigned long long energy_uj;
+            energy_file >> energy_uj;
+            energy_file.close();
+            
+            // Store initial reading for power calculation
+            static unsigned long long prev_energy[2] = {0, 0};
+            static auto prev_time = std::chrono::steady_clock::now();
+            
+            auto now = std::chrono::steady_clock::now();
+            double elapsed_sec = std::chrono::duration<double>(now - prev_time).count();
+            
+            if (prev_energy[pkg] > 0 && elapsed_sec > 0.001) {
+                // Power = Energy / Time
+                double energy_j = (energy_uj - prev_energy[pkg]) / 1000000.0;
+                total_power += energy_j / elapsed_sec;
+            }
+            
+            prev_energy[pkg] = energy_uj;
+            if (pkg == 0) prev_time = now;
+        }
+    }
+    
+    return total_power;
+}
+
+// Read GPU power from NVIDIA Management Library (NVML)
+double read_gpu_power() {
+    static bool nvml_initialized = false;
+    static void* nvml_handle = nullptr;
+    static void* (*nvmlInit_v2)() = nullptr;
+    static int (*nvmlDeviceGetHandleByIndex)(unsigned int, void**) = nullptr;
+    static int (*nvmlDeviceGetPowerUsage)(void*, unsigned int*) = nullptr;
+    
+    if (!nvml_initialized) {
+        // Try to load NVML library dynamically
+        nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+        if (!nvml_handle) {
+            nvml_handle = dlopen("libnvidia-ml.so", RTLD_LAZY);
+        }
+        
+        if (nvml_handle) {
+            *(void**)(&nvmlInit_v2) = dlsym(nvml_handle, "nvmlInit_v2");
+            *(void**)(&nvmlDeviceGetHandleByIndex) = dlsym(nvml_handle, "nvmlDeviceGetHandleByIndex");
+            *(void**)(&nvmlDeviceGetPowerUsage) = dlsym(nvml_handle, "nvmlDeviceGetPowerUsage");
+            
+            if (nvmlInit_v2 && nvmlDeviceGetHandleByIndex && nvmlDeviceGetPowerUsage) {
+                nvmlInit_v2();
+            }
+        }
+        nvml_initialized = true;
+    }
+    
+    if (!nvml_handle || !nvmlDeviceGetHandleByIndex || !nvmlDeviceGetPowerUsage) {
+        return 0.0;
+    }
+    
+    void* device;
+    if (nvmlDeviceGetHandleByIndex(0, &device) != 0) {
+        return 0.0;
+    }
+    
+    unsigned int power_mw;
+    if (nvmlDeviceGetPowerUsage(device, &power_mw) != 0) {
+        return 0.0;
+    }
+    
+    // Convert milliwatts to watts
+    return power_mw / 1000.0;
+}
+
+// Read power from available sources (Jetson or Linux Intel CPU + NVIDIA GPU)
 double read_system_power() {
     // Try Jetson INA3221 sensor (VDD_IN rail - channel 1 measures total system input power)
     const char* voltage_path = "/sys/devices/platform/bus@0/c240000.i2c/i2c-1/1-0040/hwmon/hwmon1/in1_input";
@@ -179,6 +263,15 @@ double read_system_power() {
 
         // Calculate power in watts: (mV * mA) / 1,000,000
         return (voltage_mv * current_ma) / 1000000.0;
+    }
+
+    // Try Linux Intel CPU + NVIDIA GPU power reading
+    double cpu_power = read_cpu_power();
+    double gpu_power = read_gpu_power();
+    
+    // Only return total if both CPU and GPU readings are available
+    if (cpu_power > 0.0 && gpu_power > 0.0) {
+        return cpu_power + gpu_power;
     }
 
     // Power measurement not available on this platform
