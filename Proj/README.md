@@ -2,7 +2,7 @@
 
 Comprehensive benchmarking suite for small batched 4×4 matrix multiplications on CPU, OpenMP, and CUDA GPU, with focus on robotic kinematics applications. This project investigates memory transfer optimizations, memory layout strategies, and scalability across varying chain lengths to enable real-time forward/inverse kinematics computations.
 
-📄 **[View Project Poster (PDF)](./455-poster.pdf)**
+📄 **[View Project Poster (PDF)](./455-poster.png)**
 
 ## Project Overview
 
