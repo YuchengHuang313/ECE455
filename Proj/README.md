@@ -2,6 +2,8 @@
 
 Comprehensive benchmarking suite for small batched 4×4 matrix multiplications on CPU, OpenMP, and CUDA GPU, with focus on robotic kinematics applications. This project investigates memory transfer optimizations, memory layout strategies, and scalability across varying chain lengths to enable real-time forward/inverse kinematics computations.
 
+📄 **[View Project Poster (PDF)](./455-poster.pdf)**
+
 ## Project Overview
 
 In robotic applications such as articulated arm or legged robot control, forward and inverse kinematics rely heavily on repeated small matrix multiplications to compute transformations between coordinate frames. Each joint's position and orientation is represented by 4×4 homogeneous transformation matrices, and evaluating the end-effector's pose involves chaining these matrices together.
@@ -203,7 +205,7 @@ is an additional overhead for using the streams which are greater than the kerne
 
 If you use this work, please cite:
 ```
-ECE455 Final Project: GPU-Accelerated Robotics Matrix Multiplication
+ECE455 Final Project: Performance Analysis of Generic Approaches for Large-Scale Small-Size Matrix Multiplication
 University of Wisconsin - Madison, Fall 2025
 ```
 
